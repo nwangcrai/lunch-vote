@@ -3,7 +3,6 @@ from datetime import date
 from pathlib import Path
 
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -57,13 +56,6 @@ def init_db() -> None:
     )
     conn.commit()
     conn.close()
-
-
-def get_restaurants() -> list[str]:
-    conn = get_connection()
-    names = [row[0] for row in conn.execute("SELECT name FROM restaurants ORDER BY name")]
-    conn.close()
-    return names
 
 
 def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
@@ -135,67 +127,30 @@ def get_today_results() -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def build_tug_of_war_chart(results: pd.DataFrame) -> go.Figure:
-    """One horizontal bar per restaurant, diverging from a center zero-line:
-    red (thumbs down) extends left, blue (thumbs up) extends right, lengths are
-    raw vote counts. Counts are labeled just outside each bar's tip."""
-    df = results.sort_values("net_score", ascending=True).reset_index(drop=True)
-    restaurants = df["restaurant"].tolist()
-    n = len(df)
+def render_diverging_bar(down_count: int, up_count: int, max_count: int) -> None:
+    """A center-anchored HTML bar: red (down) grows left, blue (up) grows right,
+    scaled against max_count so every restaurant's row shares one axis."""
+    down_pct = (down_count / max_count * 50) if max_count else 0
+    up_pct = (up_count / max_count * 50) if max_count else 0
+    down_label = str(down_count) if down_count else ""
+    up_label = str(up_count) if up_count else ""
 
-    down_x = (-df["thumbs_down"]).tolist()
-    up_x = df["thumbs_up"].tolist()
-    max_count = max(df["thumbs_up"].max(), df["thumbs_down"].max(), 1)
-    pad = max_count * 0.25
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Bar(
-            name="👎 Down",
-            x=down_x,
-            y=restaurants,
-            orientation="h",
-            marker_color=DOWN_COLOR,
-            text=[str(v) if v else "" for v in df["thumbs_down"]],
-            textposition="outside",
-            hovertemplate="%{y}<br>👎 %{customdata} down<extra></extra>",
-            customdata=df["thumbs_down"],
-        )
+    st.markdown(
+        f"""
+        <div style="display:flex; align-items:center; height:38px;">
+          <div style="flex:1; display:flex; justify-content:flex-end; align-items:center;">
+            <span style="margin-right:6px; color:{MUTED_COLOR}; font-size:13px;">{down_label}</span>
+            <div style="width:{down_pct}%; height:14px; background:{DOWN_COLOR}; border-radius:3px 0 0 3px;"></div>
+          </div>
+          <div style="width:2px; height:22px; background:{MUTED_COLOR}; flex-shrink:0;"></div>
+          <div style="flex:1; display:flex; justify-content:flex-start; align-items:center;">
+            <div style="width:{up_pct}%; height:14px; background:{UP_COLOR}; border-radius:0 3px 3px 0;"></div>
+            <span style="margin-left:6px; color:{MUTED_COLOR}; font-size:13px;">{up_label}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
-    fig.add_trace(
-        go.Bar(
-            name="👍 Up",
-            x=up_x,
-            y=restaurants,
-            orientation="h",
-            marker_color=UP_COLOR,
-            text=[str(v) if v else "" for v in df["thumbs_up"]],
-            textposition="outside",
-            hovertemplate="%{y}<br>👍 %{customdata} up<extra></extra>",
-            customdata=df["thumbs_up"],
-        )
-    )
-
-    # Center reference line = a tied 0-0 pull.
-    fig.add_vline(x=0, line_width=1, line_color=MUTED_COLOR, line_dash="dot")
-
-    fig.update_layout(
-        barmode="overlay",
-        bargap=0.35,
-        xaxis=dict(
-            range=[-max_count - pad, max_count + pad],
-            showticklabels=False,
-            showgrid=False,
-            zeroline=False,
-        ),
-        yaxis=dict(title=None, automargin=True),
-        height=70 + 46 * n,
-        margin=dict(l=10, r=10, t=10, b=10, autoexpand=True),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        paper_bgcolor="#fcfcfb",
-        plot_bgcolor="#fcfcfb",
-    )
-    return fig
 
 
 init_db()
@@ -209,35 +164,40 @@ st.caption(date.today().strftime("%A, %B %d, %Y"))
 voter_name = st.text_input("Your name", value=st.session_state.get("voter_name", ""))
 st.session_state["voter_name"] = voter_name
 
-restaurants = get_restaurants()
-
-st.subheader("Vote for each restaurant")
-if voter_name:
-    my_votes = get_my_votes(voter_name)
-    for name in restaurants:
-        col_name, col_up, col_down = st.columns([4, 1, 1])
-        current = my_votes.get(name)
-        col_name.write(name)
-
-        up_type = "primary" if current == "up" else "secondary"
-        down_type = "primary" if current == "down" else "secondary"
-
-        if col_up.button("👍", key=f"up_{name}", type=up_type):
-            cast_vote(voter_name, name, "up")
-            st.rerun()
-        if col_down.button("👎", key=f"down_{name}", type=down_type):
-            cast_vote(voter_name, name, "down")
-            st.rerun()
-    st.caption("Click a thumb again to remove your vote.")
-else:
-    st.info("Enter your name to vote.")
-
-st.subheader("Live results")
+st.subheader("Vote & live results")
 results = get_today_results()
 total_votes = int(results["total_votes"].sum())
-st.caption(f"{total_votes} vote(s) so far today · dotted line marks a tie (0-0)")
+st.caption(f"{total_votes} vote(s) so far today · red = 👎, blue = 👍, bars share one scale")
 
-st.plotly_chart(build_tug_of_war_chart(results), use_container_width=True)
+if not voter_name:
+    st.info("Enter your name above to vote.")
+
+max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
+my_votes = get_my_votes(voter_name) if voter_name else {}
+
+for _, row in results.iterrows():
+    name = row["restaurant"]
+    down_count = int(row["thumbs_down"])
+    up_count = int(row["thumbs_up"])
+    current = my_votes.get(name)
+
+    col_name, col_bar, col_down, col_up = st.columns([2, 4, 1, 1])
+    col_name.markdown(f"**{name}**")
+    with col_bar:
+        render_diverging_bar(down_count, up_count, max_count)
+
+    down_type = "primary" if current == "down" else "secondary"
+    up_type = "primary" if current == "up" else "secondary"
+
+    if col_down.button("👎", key=f"down_{name}", type=down_type, disabled=not voter_name):
+        cast_vote(voter_name, name, "down")
+        st.rerun()
+    if col_up.button("👍", key=f"up_{name}", type=up_type, disabled=not voter_name):
+        cast_vote(voter_name, name, "up")
+        st.rerun()
+
+if voter_name:
+    st.caption("Click a thumb again to remove your vote.")
 
 with st.expander("Exact counts"):
     st.dataframe(
