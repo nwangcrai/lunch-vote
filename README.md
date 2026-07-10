@@ -12,8 +12,11 @@ A tiny Streamlit app for the team to vote on where to get lunch, with live-updat
   the other thumb switches it.
 - Results are always for *today* — the tally naturally resets at midnight since it's filtered by
   date. Past votes stay in the database if you want to look at history later.
-- Live results show 👍/👎 counts and a net score (👍 − 👎) per restaurant, ranked highest net
-  score first.
+- Live results are shown as a "tug of war" bar per restaurant: red = share of votes that are
+  👎, blue = share that are 👍, with a marker line at the boundary between them. A dotted line
+  at the middle marks a tied 50/50 split. Restaurants with no votes yet show a flat gray bar.
+  Ranked by net score (👍 − 👎), highest first. Exact counts are in the "Exact counts" expander
+  below the chart.
 - The page auto-refreshes every 7 seconds so everyone sees new votes roll in without manually
   reloading.
 
