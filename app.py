@@ -9,8 +9,6 @@ from streamlit_autorefresh import st_autorefresh
 
 UP_COLOR = "#2a78d6"
 DOWN_COLOR = "#e34948"
-NEUTRAL_COLOR = "#e1e0d9"
-MARKER_COLOR = "#0b0b0b"
 MUTED_COLOR = "#898781"
 
 DB_PATH = Path(__file__).parent / "votes.db"
@@ -138,39 +136,28 @@ def get_today_results() -> pd.DataFrame:
 
 
 def build_tug_of_war_chart(results: pd.DataFrame) -> go.Figure:
-    """One horizontal bar per restaurant: red (thumbs down) vs blue (thumbs up),
-    split by their share of that restaurant's votes, with a marker line at the
-    boundary. A restaurant with no votes yet shows a flat neutral bar at 50/50."""
+    """One horizontal bar per restaurant, diverging from a center zero-line:
+    red (thumbs down) extends left, blue (thumbs up) extends right, lengths are
+    raw vote counts. Counts are labeled just outside each bar's tip."""
     df = results.sort_values("net_score", ascending=True).reset_index(drop=True)
     restaurants = df["restaurant"].tolist()
     n = len(df)
 
-    pct_down, pct_up, boundary = [], [], []
-    for _, row in df.iterrows():
-        total = row["total_votes"]
-        if total > 0:
-            down_share = row["thumbs_down"] / total * 100
-        else:
-            down_share = 50.0
-        pct_down.append(down_share)
-        pct_up.append(100 - down_share)
-        boundary.append(down_share)
-
-    bar_colors_down = [NEUTRAL_COLOR if t == 0 else DOWN_COLOR for t in df["total_votes"]]
-    bar_colors_up = [NEUTRAL_COLOR if t == 0 else UP_COLOR for t in df["total_votes"]]
+    down_x = (-df["thumbs_down"]).tolist()
+    up_x = df["thumbs_up"].tolist()
+    max_count = max(df["thumbs_up"].max(), df["thumbs_down"].max(), 1)
+    pad = max_count * 0.25
 
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
             name="👎 Down",
-            x=pct_down,
+            x=down_x,
             y=restaurants,
             orientation="h",
-            marker_color=bar_colors_down,
+            marker_color=DOWN_COLOR,
             text=[str(v) if v else "" for v in df["thumbs_down"]],
-            textposition="inside",
-            insidetextanchor="start",
-            textfont_color="#ffffff",
+            textposition="outside",
             hovertemplate="%{y}<br>👎 %{customdata} down<extra></extra>",
             customdata=df["thumbs_down"],
         )
@@ -178,38 +165,29 @@ def build_tug_of_war_chart(results: pd.DataFrame) -> go.Figure:
     fig.add_trace(
         go.Bar(
             name="👍 Up",
-            x=pct_up,
+            x=up_x,
             y=restaurants,
             orientation="h",
-            marker_color=bar_colors_up,
+            marker_color=UP_COLOR,
             text=[str(v) if v else "" for v in df["thumbs_up"]],
-            textposition="inside",
-            insidetextanchor="end",
-            textfont_color="#ffffff",
+            textposition="outside",
             hovertemplate="%{y}<br>👍 %{customdata} up<extra></extra>",
             customdata=df["thumbs_up"],
         )
     )
 
-    # Marker line at the up/down boundary for each row (the "tug of war" pull point).
-    fig.add_trace(
-        go.Scatter(
-            x=boundary,
-            y=restaurants,
-            mode="markers",
-            marker=dict(symbol="line-ns", size=32, line=dict(width=2, color=MARKER_COLOR)),
-            showlegend=False,
-            hoverinfo="skip",
-        )
-    )
-
-    # Center reference line = a tied 50/50 pull.
-    fig.add_vline(x=50, line_width=1, line_color=MUTED_COLOR, line_dash="dot")
+    # Center reference line = a tied 0-0 pull.
+    fig.add_vline(x=0, line_width=1, line_color=MUTED_COLOR, line_dash="dot")
 
     fig.update_layout(
-        barmode="stack",
+        barmode="overlay",
         bargap=0.35,
-        xaxis=dict(range=[0, 100], showticklabels=False, showgrid=False, zeroline=False),
+        xaxis=dict(
+            range=[-max_count - pad, max_count + pad],
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+        ),
         yaxis=dict(title=None, automargin=True),
         height=70 + 46 * n,
         margin=dict(l=10, r=10, t=10, b=10, autoexpand=True),
@@ -257,7 +235,7 @@ else:
 st.subheader("Live results")
 results = get_today_results()
 total_votes = int(results["total_votes"].sum())
-st.caption(f"{total_votes} vote(s) so far today · dotted line marks a tied 50/50 pull")
+st.caption(f"{total_votes} vote(s) so far today · dotted line marks a tie (0-0)")
 
 st.plotly_chart(build_tug_of_war_chart(results), use_container_width=True)
 
