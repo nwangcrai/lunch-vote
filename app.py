@@ -33,7 +33,8 @@ def init_db() -> None:
             voter_name TEXT NOT NULL,
             restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
             vote_date TEXT NOT NULL,
-            UNIQUE(voter_name, vote_date)
+            sentiment TEXT NOT NULL CHECK(sentiment IN ('up', 'down')),
+            UNIQUE(voter_name, restaurant_id, vote_date)
         )
         """
     )
@@ -54,53 +55,73 @@ def get_restaurants() -> list[str]:
     return names
 
 
-def cast_vote(voter_name: str, restaurant_name: str) -> None:
+def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
+    """Upsert a thumbs up/down vote. Voting the same sentiment again clears it (toggle off)."""
     conn = get_connection()
     restaurant_id = conn.execute(
         "SELECT id FROM restaurants WHERE name = ?", (restaurant_name,)
     ).fetchone()[0]
-    conn.execute(
-        """
-        INSERT INTO votes (voter_name, restaurant_id, vote_date)
-        VALUES (?, ?, ?)
-        ON CONFLICT(voter_name, vote_date)
-        DO UPDATE SET restaurant_id = excluded.restaurant_id
-        """,
-        (voter_name, restaurant_id, date.today().isoformat()),
-    )
+    today = date.today().isoformat()
+
+    existing = conn.execute(
+        "SELECT sentiment FROM votes WHERE voter_name = ? AND restaurant_id = ? AND vote_date = ?",
+        (voter_name, restaurant_id, today),
+    ).fetchone()
+
+    if existing and existing[0] == sentiment:
+        conn.execute(
+            "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ? AND vote_date = ?",
+            (voter_name, restaurant_id, today),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO votes (voter_name, restaurant_id, vote_date, sentiment)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(voter_name, restaurant_id, vote_date)
+            DO UPDATE SET sentiment = excluded.sentiment
+            """,
+            (voter_name, restaurant_id, today, sentiment),
+        )
     conn.commit()
     conn.close()
 
 
-def get_my_vote(voter_name: str) -> str | None:
+def get_my_votes(voter_name: str) -> dict[str, str]:
     conn = get_connection()
-    row = conn.execute(
+    rows = conn.execute(
         """
-        SELECT r.name FROM votes v
+        SELECT r.name, v.sentiment FROM votes v
         JOIN restaurants r ON r.id = v.restaurant_id
         WHERE v.voter_name = ? AND v.vote_date = ?
         """,
         (voter_name, date.today().isoformat()),
-    ).fetchone()
+    ).fetchall()
     conn.close()
-    return row[0] if row else None
+    return dict(rows)
 
 
 def get_today_results() -> pd.DataFrame:
     conn = get_connection()
     df = pd.read_sql_query(
         """
-        SELECT r.name AS restaurant, COUNT(v.id) AS votes
+        SELECT
+            r.name AS restaurant,
+            SUM(CASE WHEN v.sentiment = 'up' THEN 1 ELSE 0 END) AS thumbs_up,
+            SUM(CASE WHEN v.sentiment = 'down' THEN 1 ELSE 0 END) AS thumbs_down
         FROM restaurants r
         LEFT JOIN votes v ON v.restaurant_id = r.id AND v.vote_date = ?
         GROUP BY r.name
-        ORDER BY votes DESC, restaurant ASC
         """,
         conn,
         params=(date.today().isoformat(),),
     )
     conn.close()
-    return df
+    df["net_score"] = df["thumbs_up"] - df["thumbs_down"]
+    df["total_votes"] = df["thumbs_up"] + df["thumbs_down"]
+    return df.sort_values(
+        ["net_score", "total_votes"], ascending=False
+    ).reset_index(drop=True)
 
 
 init_db()
@@ -116,26 +137,46 @@ st.session_state["voter_name"] = voter_name
 
 restaurants = get_restaurants()
 
+st.subheader("Vote for each restaurant")
 if voter_name:
-    current_vote = get_my_vote(voter_name)
-    default_index = restaurants.index(current_vote) if current_vote in restaurants else 0
-    choice = st.radio("Pick a restaurant", restaurants, index=default_index)
+    my_votes = get_my_votes(voter_name)
+    for name in restaurants:
+        col_name, col_up, col_down = st.columns([4, 1, 1])
+        current = my_votes.get(name)
+        col_name.write(name)
 
-    if st.button("Vote"):
-        cast_vote(voter_name, choice)
-        st.success(f"Vote recorded for {choice}!")
-        st.rerun()
+        up_type = "primary" if current == "up" else "secondary"
+        down_type = "primary" if current == "down" else "secondary"
+
+        if col_up.button("👍", key=f"up_{name}", type=up_type):
+            cast_vote(voter_name, name, "up")
+            st.rerun()
+        if col_down.button("👎", key=f"down_{name}", type=down_type):
+            cast_vote(voter_name, name, "down")
+            st.rerun()
+    st.caption("Click a thumb again to remove your vote.")
 else:
     st.info("Enter your name to vote.")
 
 st.subheader("Live results")
 results = get_today_results()
-total_votes = int(results["votes"].sum())
+total_votes = int(results["total_votes"].sum())
 st.caption(f"{total_votes} vote(s) so far today")
 
 if total_votes > 0:
-    st.bar_chart(results.set_index("restaurant")["votes"])
+    st.bar_chart(results.set_index("restaurant")["net_score"])
 else:
     st.write("No votes yet — be the first!")
 
-st.dataframe(results, use_container_width=True, hide_index=True)
+st.dataframe(
+    results.rename(
+        columns={
+            "thumbs_up": "👍",
+            "thumbs_down": "👎",
+            "net_score": "Net Score",
+            "total_votes": "Total",
+        }
+    ),
+    use_container_width=True,
+    hide_index=True,
+)

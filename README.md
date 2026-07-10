@@ -7,10 +7,13 @@ A tiny Streamlit app for the team to vote on where to get lunch, with live-updat
 - Restaurant options are read from `restaurants.csv` (one name per row) — edit that file to
   change the list, no code changes needed.
 - Votes are stored in a local SQLite database (`votes.db`, created automatically on first run).
-- Each person can cast one vote per day (matched by the name they type in); voting again the
-  same day changes their vote rather than adding a second one.
+- Each person can give a 👍 or 👎 to *any number* of restaurants per day (matched by the name
+  they type in) — not a single pick. Clicking the same thumb again removes that vote; clicking
+  the other thumb switches it.
 - Results are always for *today* — the tally naturally resets at midnight since it's filtered by
   date. Past votes stay in the database if you want to look at history later.
+- Live results show 👍/👎 counts and a net score (👍 − 👎) per restaurant, ranked highest net
+  score first.
 - The page auto-refreshes every 7 seconds so everyone sees new votes roll in without manually
   reloading.
 
