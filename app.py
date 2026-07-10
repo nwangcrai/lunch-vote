@@ -26,6 +26,12 @@ def init_db() -> None:
         )
         """
     )
+    # "CREATE TABLE IF NOT EXISTS" is a no-op against a votes.db left over from an older
+    # schema version, so drop and recreate if the table predates the sentiment column.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(votes)")}
+    if existing_cols and "sentiment" not in existing_cols:
+        conn.execute("DROP TABLE votes")
+
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS votes (
