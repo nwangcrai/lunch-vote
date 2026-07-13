@@ -6,7 +6,8 @@ import pandas as pd
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-UP_COLOR = "#2a78d6"
+UP_COLOR = "#008300"
+UP_COLOR_HOVER = "#006b00"
 DOWN_COLOR = "#e34948"
 MUTED_COLOR = "#898781"
 
@@ -128,7 +129,7 @@ def get_today_results() -> pd.DataFrame:
 
 
 def render_diverging_bar(down_count: int, up_count: int, max_count: int) -> None:
-    """A center-anchored HTML bar: red (down) grows left, blue (up) grows right,
+    """A center-anchored HTML bar: red (down) grows left, green (up) grows right,
     scaled against max_count so every restaurant's row shares one axis."""
     down_pct = (down_count / max_count * 50) if max_count else 0
     up_pct = (up_count / max_count * 50) if max_count else 0
@@ -158,6 +159,25 @@ init_db()
 st.set_page_config(page_title="Lunch Vote", page_icon="🍽️")
 st_autorefresh(interval=7_000, key="lunch_vote_refresh")
 
+# Streamlit's default "primary" button color is red, which already matches the down-vote
+# button. Only the up-vote button (key prefix "up_") needs to be overridden to green.
+st.markdown(
+    f"""
+    <style>
+    [class*="st-key-up_"] button[data-testid="stBaseButton-primary"] {{
+        background-color: {UP_COLOR};
+        border-color: {UP_COLOR};
+        color: #ffffff;
+    }}
+    [class*="st-key-up_"] button[data-testid="stBaseButton-primary"]:hover {{
+        background-color: {UP_COLOR_HOVER};
+        border-color: {UP_COLOR_HOVER};
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.title("Where's lunch today? 🍽️")
 st.caption(date.today().strftime("%A, %B %d, %Y"))
 
@@ -167,7 +187,7 @@ st.session_state["voter_name"] = voter_name
 st.subheader("Vote & live results")
 results = get_today_results()
 total_votes = int(results["total_votes"].sum())
-st.caption(f"{total_votes} vote(s) so far today · red = 👎, blue = 👍, bars share one scale")
+st.caption(f"{total_votes} vote(s) so far today · red = 👎, green = 👍, bars share one scale")
 
 if not voter_name:
     st.info("Enter your name above to vote.")
@@ -175,20 +195,31 @@ if not voter_name:
 max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
 my_votes = get_my_votes(voter_name) if voter_name else {}
 
+COLUMN_RATIOS = [2, 4, 1, 2]
+
+header_name, header_bar, header_net, header_vote = st.columns(COLUMN_RATIOS)
+header_name.markdown("**Restaurant**")
+header_bar.markdown("**Votes**")
+header_net.markdown("**Net Score**")
+header_vote.markdown("**Your vote**")
+
 for _, row in results.iterrows():
     name = row["restaurant"]
     down_count = int(row["thumbs_down"])
     up_count = int(row["thumbs_up"])
+    net_score = int(row["net_score"])
     current = my_votes.get(name)
 
-    col_name, col_bar, col_down, col_up = st.columns([2, 4, 1, 1])
+    col_name, col_bar, col_net, col_vote = st.columns(COLUMN_RATIOS)
     col_name.markdown(f"**{name}**")
     with col_bar:
         render_diverging_bar(down_count, up_count, max_count)
+    col_net.markdown(f"{net_score:+d}" if net_score else "0")
 
     down_type = "primary" if current == "down" else "secondary"
     up_type = "primary" if current == "up" else "secondary"
 
+    col_down, col_up = col_vote.columns(2)
     if col_down.button("👎", key=f"down_{name}", type=down_type, disabled=not voter_name):
         cast_vote(voter_name, name, "down")
         st.rerun()
@@ -198,17 +229,3 @@ for _, row in results.iterrows():
 
 if voter_name:
     st.caption("Click a thumb again to remove your vote.")
-
-with st.expander("Exact counts"):
-    st.dataframe(
-        results.rename(
-            columns={
-                "thumbs_up": "👍",
-                "thumbs_down": "👎",
-                "net_score": "Net Score",
-                "total_votes": "Total",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
