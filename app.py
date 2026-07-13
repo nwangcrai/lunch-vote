@@ -276,7 +276,10 @@ def centered(text: str, nowrap: bool = False) -> str:
 header_name, header_desc, header_vote, header_bar, header_net = st.columns(COLUMN_RATIOS)
 header_name.markdown("<div style='white-space:nowrap;'>Restaurant</div>", unsafe_allow_html=True)
 header_desc.markdown("Description")
-header_vote.markdown(centered("Your vote"), unsafe_allow_html=True)
+header_vote.markdown(
+    "<div style='text-align:center; transform: translateX(-12px);'>Your vote</div>",
+    unsafe_allow_html=True,
+)
 header_bar.markdown(centered("Votes"), unsafe_allow_html=True)
 header_net.markdown(centered("Net Score", nowrap=True), unsafe_allow_html=True)
 st.markdown(
