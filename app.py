@@ -1,3 +1,4 @@
+import base64
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -13,6 +14,12 @@ MUTED_COLOR = "#898781"
 
 DB_PATH = Path(__file__).parent / "votes.db"
 RESTAURANTS_CSV = Path(__file__).parent / "restaurants.csv"
+THUMBS_UP_PNG = Path(__file__).parent / "thumbs_up.png"
+THUMBS_DOWN_PNG = Path(__file__).parent / "thumbs_down.png"
+
+
+def image_data_uri(path: Path) -> str:
+    return f"data:image/png;base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
 def get_connection() -> sqlite3.Connection:
@@ -168,15 +175,28 @@ init_db()
 st.set_page_config(page_title="Lunch Vote", page_icon="🍽️")
 st_autorefresh(interval=7_000, key="lunch_vote_refresh")
 
+# Vote buttons show the thumbs_up.png/thumbs_down.png icons instead of their text label
+# (emptied to a non-breaking space, since st.button requires a non-empty label).
 # Streamlit's default "primary" button color is red, which already matches the down-vote
 # button. Only the up-vote button (key prefix "up_") needs to be overridden to green.
 st.markdown(
     f"""
     <style>
+    [class*="st-key-up_"] button, [class*="st-key-down_"] button {{
+        color: transparent;
+        background-repeat: no-repeat;
+        background-position: center;
+        background-size: 20px 20px;
+    }}
+    [class*="st-key-up_"] button {{
+        background-image: url({image_data_uri(THUMBS_UP_PNG)});
+    }}
+    [class*="st-key-down_"] button {{
+        background-image: url({image_data_uri(THUMBS_DOWN_PNG)});
+    }}
     [class*="st-key-up_"] button[data-testid="stBaseButton-primary"] {{
         background-color: {UP_COLOR};
         border-color: {UP_COLOR};
-        color: #ffffff;
     }}
     [class*="st-key-up_"] button[data-testid="stBaseButton-primary"]:hover {{
         background-color: {UP_COLOR_HOVER};
@@ -190,8 +210,8 @@ st.markdown(
 st.title("DC Office Lunch Votes")
 st.caption(date.today().strftime("%A, %B %d, %Y"))
 
-voter_name = st.text_input("Your name", value=st.session_state.get("voter_name", ""))
-st.session_state["voter_name"] = voter_name
+st.text_input("Your name", key="voter_name")
+voter_name = st.session_state["voter_name"]
 
 if not voter_name:
     st.info("Enter your name above to vote. Duplicates will be ignored, so please use your real name.")
@@ -242,10 +262,10 @@ for _, row in results.iterrows():
     up_type = "primary" if current == "up" else "secondary"
 
     col_down, col_up = col_vote.columns(2)
-    if col_down.button("👎", key=f"down_{name}", type=down_type, disabled=not voter_name):
+    if col_down.button(" ", key=f"down_{name}", type=down_type, disabled=not voter_name):
         cast_vote(voter_name, name, "down")
         st.rerun()
-    if col_up.button("👍", key=f"up_{name}", type=up_type, disabled=not voter_name):
+    if col_up.button(" ", key=f"up_{name}", type=up_type, disabled=not voter_name):
         cast_vote(voter_name, name, "up")
         st.rerun()
 
