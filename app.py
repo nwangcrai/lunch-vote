@@ -27,10 +27,15 @@ def init_db() -> None:
         """
         CREATE TABLE IF NOT EXISTS restaurants (
             id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
+            name TEXT UNIQUE NOT NULL,
+            description TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    # "CREATE TABLE IF NOT EXISTS" won't add a column to a restaurants table left over
+    # from before descriptions existed.
+    if "description" not in {row[1] for row in conn.execute("PRAGMA table_info(restaurants)")}:
+        conn.execute("ALTER TABLE restaurants ADD COLUMN description TEXT NOT NULL DEFAULT ''")
     # "CREATE TABLE IF NOT EXISTS" is a no-op against a votes.db left over from an older
     # schema version, so drop and recreate if the table predates the sentiment column.
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(votes)")}
@@ -50,10 +55,13 @@ def init_db() -> None:
         """
     )
 
-    names = pd.read_csv(RESTAURANTS_CSV)["name"].tolist()
+    restaurants_df = pd.read_csv(RESTAURANTS_CSV)
     conn.executemany(
-        "INSERT OR IGNORE INTO restaurants (name) VALUES (?)",
-        [(n,) for n in names],
+        """
+        INSERT INTO restaurants (name, description) VALUES (?, ?)
+        ON CONFLICT(name) DO UPDATE SET description = excluded.description
+        """,
+        list(restaurants_df[["name", "description"]].itertuples(index=False, name=None)),
     )
     conn.commit()
     conn.close()
@@ -111,11 +119,12 @@ def get_today_results() -> pd.DataFrame:
         """
         SELECT
             r.name AS restaurant,
+            r.description AS description,
             SUM(CASE WHEN v.sentiment = 'up' THEN 1 ELSE 0 END) AS thumbs_up,
             SUM(CASE WHEN v.sentiment = 'down' THEN 1 ELSE 0 END) AS thumbs_down
         FROM restaurants r
         LEFT JOIN votes v ON v.restaurant_id = r.id AND v.vote_date = ?
-        GROUP BY r.name
+        GROUP BY r.name, r.description
         """,
         conn,
         params=(date.today().isoformat(),),
@@ -178,35 +187,36 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Where's lunch today? 🍽️")
+st.title("DC Office Lunch Votes")
 st.caption(date.today().strftime("%A, %B %d, %Y"))
 
 voter_name = st.text_input("Your name", value=st.session_state.get("voter_name", ""))
 st.session_state["voter_name"] = voter_name
 
+if not voter_name:
+    st.info("Enter your name above to vote. Duplicates will be ignored, so please use your real name.")
+
 st.subheader("Vote & live results")
 results = get_today_results()
 total_votes = int(results["total_votes"].sum())
-st.caption(f"{total_votes} vote(s) so far today · red = 👎, green = 👍, bars share one scale")
-
-if not voter_name:
-    st.info("Enter your name above to vote.")
+st.caption(f"{total_votes} vote(s) so far. Bars share one scale")
 
 max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
 my_votes = get_my_votes(voter_name) if voter_name else {}
 
-COLUMN_RATIOS = [2, 4, 1, 2]
+COLUMN_RATIOS = [2, 3, 2, 4, 1]
 
 
 def centered(text: str) -> str:
     return f"<div style='text-align:center;'>{text}</div>"
 
 
-header_name, header_bar, header_net, header_vote = st.columns(COLUMN_RATIOS)
+header_name, header_desc, header_vote, header_bar, header_net = st.columns(COLUMN_RATIOS)
 header_name.markdown("Restaurant")
+header_desc.markdown("Description")
+header_vote.markdown(centered("Your vote"), unsafe_allow_html=True)
 header_bar.markdown(centered("Votes"), unsafe_allow_html=True)
 header_net.markdown(centered("Net Score"), unsafe_allow_html=True)
-header_vote.markdown(centered("Your vote"), unsafe_allow_html=True)
 st.markdown(
     f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
     unsafe_allow_html=True,
@@ -214,13 +224,15 @@ st.markdown(
 
 for _, row in results.iterrows():
     name = row["restaurant"]
+    description = row["description"]
     down_count = int(row["thumbs_down"])
     up_count = int(row["thumbs_up"])
     net_score = int(row["net_score"])
     current = my_votes.get(name)
 
-    col_name, col_bar, col_net, col_vote = st.columns(COLUMN_RATIOS)
+    col_name, col_desc, col_vote, col_bar, col_net = st.columns(COLUMN_RATIOS)
     col_name.markdown(f"**{name}**")
+    col_desc.markdown(description)
     with col_bar:
         render_diverging_bar(down_count, up_count, max_count)
     net_label = f"{net_score:+d}" if net_score else "0"

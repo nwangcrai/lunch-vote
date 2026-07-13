@@ -1,9 +1,13 @@
-name
-Chipotle
-Panera Bread
-Sweetgreen
-Chick-fil-A
-Local Pizza Co
-Thai Basil
-Sushi Zen
-The Deli Counter
+name,description
+Chipotle,"Build-your-own burritos, bowls, and tacos"
+Panera Bread,"Soups, sandwiches, and bakery-cafe fare"
+Sweetgreen,"Customizable salads and grain bowls"
+Chick-fil-A,"Chicken sandwiches and waffle fries"
+Local Pizza Co,"Neighborhood pizzeria with slices and pies"
+Thai Basil,"Thai curries, noodles, and stir-fry"
+Sushi Zen,"Sushi rolls, bento boxes, and ramen"
+The Deli Counter,"Classic sandwiches and deli plates"
+Roti Modern Mediterranean,"Mediterranean bowls, pitas, and plates"
+Taco Bell,"Fast-food Mexican-inspired tacos and burritos"
+Shake Shack,"Burgers, fries, and milkshakes"
+Cava,"Mediterranean bowls with customizable toppings"
