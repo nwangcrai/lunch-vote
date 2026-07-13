@@ -290,7 +290,7 @@ header_name, header_desc, header_vote, header_bar, header_net = st.columns(COLUM
 header_name.markdown("<div style='white-space:nowrap;'>Restaurant</div>", unsafe_allow_html=True)
 header_desc.markdown("Description")
 header_vote.markdown(
-    "<div style='text-align:center; transform: translateX(-30px);'>Your Vote</div>",
+    "<div style='text-align:center; transform: translateX(-2px);'>Your Vote</div>",
     unsafe_allow_html=True,
 )
 header_bar.markdown(centered("All Votes"), unsafe_allow_html=True)
