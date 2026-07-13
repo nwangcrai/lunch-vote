@@ -195,8 +195,8 @@ st.markdown(
     <style>
     .block-container {
         max-width: 100%;
-        padding-left: 2rem;
-        padding-right: 2rem;
+        padding-left: 5rem;
+        padding-right: 5rem;
     }
     </style>
     """,
@@ -255,7 +255,7 @@ if not voter_name:
         unsafe_allow_html=True,
     )
 
-st.subheader("Your vote & Live total results")
+st.subheader("Your Vote & Live Total Results")
 results = get_results()
 respondent_count = get_respondent_count()
 st.caption(f"{respondent_count} respondent(s) so far. Bars share one scale")
