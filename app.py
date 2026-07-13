@@ -71,6 +71,37 @@ def init_db() -> None:
         """,
         list(restaurants_df[["name", "description"]].itertuples(index=False, name=None)),
     )
+
+    # Restaurants renamed across a restaurants.csv refresh leave a stale duplicate row behind
+    # (init_db only upserts, never deletes), which shows up as a second, identical-looking
+    # entry in results. Migrate any votes on the old name onto the new one, then drop the
+    # stale row, so nobody's vote is lost in the process.
+    RENAMED_RESTAURANTS = {"Roti Modern Mediterranean": "Roti"}
+    for old_name, new_name in RENAMED_RESTAURANTS.items():
+        old_row = conn.execute("SELECT id FROM restaurants WHERE name = ?", (old_name,)).fetchone()
+        new_row = conn.execute("SELECT id FROM restaurants WHERE name = ?", (new_name,)).fetchone()
+        if old_row and new_row:
+            old_id, new_id = old_row[0], new_row[0]
+            conn.execute(
+                "UPDATE OR IGNORE votes SET restaurant_id = ? WHERE restaurant_id = ?",
+                (new_id, old_id),
+            )
+            conn.execute("DELETE FROM votes WHERE restaurant_id = ?", (old_id,))
+            conn.execute("DELETE FROM restaurants WHERE id = ?", (old_id,))
+
+    # Restaurants dropped from restaurants.csv with no rename mapping and no votes attached
+    # are safe to prune so they stop cluttering results; ones with votes are left in place
+    # rather than silently discarding someone's vote.
+    current_names = set(restaurants_df["name"])
+    conn.execute(
+        f"""
+        DELETE FROM restaurants
+        WHERE name NOT IN ({",".join("?" * len(current_names))})
+        AND id NOT IN (SELECT DISTINCT restaurant_id FROM votes)
+        """,
+        list(current_names),
+    )
+
     conn.commit()
     conn.close()
 
