@@ -3,3 +3,4 @@ __pycache__/
 *.log
 votes.db
 CLAUDE.md
+.streamlit/secrets.toml

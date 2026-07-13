@@ -44,9 +44,11 @@ def init_db() -> None:
     if "description" not in {row[1] for row in conn.execute("PRAGMA table_info(restaurants)")}:
         conn.execute("ALTER TABLE restaurants ADD COLUMN description TEXT NOT NULL DEFAULT ''")
     # "CREATE TABLE IF NOT EXISTS" is a no-op against a votes.db left over from an older
-    # schema version, so drop and recreate if the table predates the sentiment column.
+    # schema version, so drop and recreate if the table predates the sentiment column or
+    # still carries the retired vote_date column (votes are now permanent until a manual
+    # reset, not daily-scoped).
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(votes)")}
-    if existing_cols and "sentiment" not in existing_cols:
+    if existing_cols and ("sentiment" not in existing_cols or "vote_date" in existing_cols):
         conn.execute("DROP TABLE votes")
 
     conn.execute(
@@ -55,9 +57,8 @@ def init_db() -> None:
             id INTEGER PRIMARY KEY,
             voter_name TEXT NOT NULL,
             restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
-            vote_date TEXT NOT NULL,
             sentiment TEXT NOT NULL CHECK(sentiment IN ('up', 'down')),
-            UNIQUE(voter_name, restaurant_id, vote_date)
+            UNIQUE(voter_name, restaurant_id)
         )
         """
     )
@@ -75,33 +76,40 @@ def init_db() -> None:
 
 
 def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
-    """Upsert a thumbs up/down vote. Voting the same sentiment again clears it (toggle off)."""
+    """Upsert a thumbs up/down vote. Voting the same sentiment again clears it (toggle off).
+    Votes are permanent (one per person per restaurant) until an admin reset clears the table."""
     conn = get_connection()
     restaurant_id = conn.execute(
         "SELECT id FROM restaurants WHERE name = ?", (restaurant_name,)
     ).fetchone()[0]
-    today = date.today().isoformat()
 
     existing = conn.execute(
-        "SELECT sentiment FROM votes WHERE voter_name = ? AND restaurant_id = ? AND vote_date = ?",
-        (voter_name, restaurant_id, today),
+        "SELECT sentiment FROM votes WHERE voter_name = ? AND restaurant_id = ?",
+        (voter_name, restaurant_id),
     ).fetchone()
 
     if existing and existing[0] == sentiment:
         conn.execute(
-            "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ? AND vote_date = ?",
-            (voter_name, restaurant_id, today),
+            "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ?",
+            (voter_name, restaurant_id),
         )
     else:
         conn.execute(
             """
-            INSERT INTO votes (voter_name, restaurant_id, vote_date, sentiment)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(voter_name, restaurant_id, vote_date)
+            INSERT INTO votes (voter_name, restaurant_id, sentiment)
+            VALUES (?, ?, ?)
+            ON CONFLICT(voter_name, restaurant_id)
             DO UPDATE SET sentiment = excluded.sentiment
             """,
-            (voter_name, restaurant_id, today, sentiment),
+            (voter_name, restaurant_id, sentiment),
         )
+    conn.commit()
+    conn.close()
+
+
+def reset_all_votes() -> None:
+    conn = get_connection()
+    conn.execute("DELETE FROM votes")
     conn.commit()
     conn.close()
 
@@ -112,15 +120,22 @@ def get_my_votes(voter_name: str) -> dict[str, str]:
         """
         SELECT r.name, v.sentiment FROM votes v
         JOIN restaurants r ON r.id = v.restaurant_id
-        WHERE v.voter_name = ? AND v.vote_date = ?
+        WHERE v.voter_name = ?
         """,
-        (voter_name, date.today().isoformat()),
+        (voter_name,),
     ).fetchall()
     conn.close()
     return dict(rows)
 
 
-def get_today_results() -> pd.DataFrame:
+def get_respondent_count() -> int:
+    conn = get_connection()
+    count = conn.execute("SELECT COUNT(DISTINCT voter_name) FROM votes").fetchone()[0]
+    conn.close()
+    return count
+
+
+def get_results() -> pd.DataFrame:
     conn = get_connection()
     df = pd.read_sql_query(
         """
@@ -130,11 +145,10 @@ def get_today_results() -> pd.DataFrame:
             SUM(CASE WHEN v.sentiment = 'up' THEN 1 ELSE 0 END) AS thumbs_up,
             SUM(CASE WHEN v.sentiment = 'down' THEN 1 ELSE 0 END) AS thumbs_down
         FROM restaurants r
-        LEFT JOIN votes v ON v.restaurant_id = r.id AND v.vote_date = ?
+        LEFT JOIN votes v ON v.restaurant_id = r.id
         GROUP BY r.name, r.description
         """,
         conn,
-        params=(date.today().isoformat(),),
     )
     conn.close()
     df["net_score"] = df["thumbs_up"] - df["thumbs_down"]
@@ -172,8 +186,22 @@ def render_diverging_bar(down_count: int, up_count: int, max_count: int) -> None
 
 init_db()
 
-st.set_page_config(page_title="Lunch Vote", page_icon="🍽️")
+st.set_page_config(page_title="Lunch Vote", page_icon="🍽️", layout="wide")
 st_autorefresh(interval=7_000, key="lunch_vote_refresh")
+
+# Use more of the page width instead of Streamlit's default centered, margin-heavy layout.
+st.markdown(
+    """
+    <style>
+    .block-container {
+        max-width: 100%;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # Vote buttons show the thumbs_up.png/thumbs_down.png icons instead of their text label
 # (emptied to a non-breaking space, since st.button requires a non-empty label).
@@ -214,29 +242,43 @@ st.text_input("Your name", key="voter_name")
 voter_name = st.session_state["voter_name"]
 
 if not voter_name:
-    st.info("Enter your name above to vote. Duplicates will be ignored, so please use your real name.")
+    st.info(
+        "Enter your name above to vote. Duplicates will be ignored, so please use your real name.",
+        icon=None,
+    )
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAlertContainer"] p { font-size: 14px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-st.subheader("Vote & live results")
-results = get_today_results()
-total_votes = int(results["total_votes"].sum())
-st.caption(f"{total_votes} vote(s) so far. Bars share one scale")
+st.subheader("Your vote & Live total results")
+results = get_results()
+respondent_count = get_respondent_count()
+st.caption(f"{respondent_count} respondent(s) so far. Bars share one scale")
 
 max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
 my_votes = get_my_votes(voter_name) if voter_name else {}
 
-COLUMN_RATIOS = [2, 3, 2, 4, 1]
+COLUMN_RATIOS = [3, 3, 2, 4, 1]
 
 
-def centered(text: str) -> str:
-    return f"<div style='text-align:center;'>{text}</div>"
+def centered(text: str, nowrap: bool = False) -> str:
+    style = "text-align:center;"
+    if nowrap:
+        style += " white-space:nowrap;"
+    return f"<div style='{style}'>{text}</div>"
 
 
 header_name, header_desc, header_vote, header_bar, header_net = st.columns(COLUMN_RATIOS)
-header_name.markdown("Restaurant")
+header_name.markdown("<div style='white-space:nowrap;'>Restaurant</div>", unsafe_allow_html=True)
 header_desc.markdown("Description")
 header_vote.markdown(centered("Your vote"), unsafe_allow_html=True)
 header_bar.markdown(centered("Votes"), unsafe_allow_html=True)
-header_net.markdown(centered("Net Score"), unsafe_allow_html=True)
+header_net.markdown(centered("Net Score", nowrap=True), unsafe_allow_html=True)
 st.markdown(
     f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
     unsafe_allow_html=True,
@@ -251,12 +293,12 @@ for _, row in results.iterrows():
     current = my_votes.get(name)
 
     col_name, col_desc, col_vote, col_bar, col_net = st.columns(COLUMN_RATIOS)
-    col_name.markdown(f"**{name}**")
+    col_name.markdown(f"<div style='white-space:nowrap;'><strong>{name}</strong></div>", unsafe_allow_html=True)
     col_desc.markdown(description)
     with col_bar:
         render_diverging_bar(down_count, up_count, max_count)
     net_label = f"{net_score:+d}" if net_score else "0"
-    col_net.markdown(centered(net_label), unsafe_allow_html=True)
+    col_net.markdown(centered(net_label, nowrap=True), unsafe_allow_html=True)
 
     down_type = "primary" if current == "down" else "secondary"
     up_type = "primary" if current == "up" else "secondary"
@@ -271,3 +313,13 @@ for _, row in results.iterrows():
 
 if voter_name:
     st.caption("Click a thumb again to remove your vote.")
+
+with st.expander("Admin: reset votes"):
+    reset_password = st.text_input("Password", type="password", key="reset_password_input")
+    if st.button("Reset all votes"):
+        if reset_password and reset_password == st.secrets.get("reset_password"):
+            reset_all_votes()
+            st.success("All votes have been reset.")
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
