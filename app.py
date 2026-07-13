@@ -238,7 +238,7 @@ st.markdown(
 st.title("DC Office Lunch Votes")
 st.caption(date.today().strftime("%A, %B %d, %Y"))
 
-st.text_input("Your name", key="voter_name")
+st.text_input("Your Name", key="voter_name")
 voter_name = st.session_state["voter_name"]
 
 if not voter_name:
@@ -277,7 +277,7 @@ header_name, header_desc, header_vote, header_bar, header_net = st.columns(COLUM
 header_name.markdown("<div style='white-space:nowrap;'>Restaurant</div>", unsafe_allow_html=True)
 header_desc.markdown("Description")
 header_vote.markdown(
-    "<div style='text-align:center; transform: translateX(-12px);'>Your vote</div>",
+    "<div style='text-align:center; transform: translateX(-30px);'>Your Vote</div>",
     unsafe_allow_html=True,
 )
 header_bar.markdown(centered("Votes"), unsafe_allow_html=True)
