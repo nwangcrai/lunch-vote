@@ -236,7 +236,7 @@ st.markdown(
 )
 
 st.title("DC Office Lunch Votes")
-st.caption(date.today().strftime("%A, %B %d, %Y"))
+st.caption(date.today().strftime("%A, %B %d, %Y") + " Presented by Al & Norman")
 
 st.text_input("Your Name", key="voter_name")
 voter_name = st.session_state["voter_name"]
