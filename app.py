@@ -203,10 +203,10 @@ def centered(text: str) -> str:
 
 
 header_name, header_bar, header_net, header_vote = st.columns(COLUMN_RATIOS)
-header_name.markdown("**Restaurant**")
-header_bar.markdown(centered("**Votes**"), unsafe_allow_html=True)
-header_net.markdown(centered("**Net Score**"), unsafe_allow_html=True)
-header_vote.markdown(centered("**Your vote**"), unsafe_allow_html=True)
+header_name.markdown("Restaurant")
+header_bar.markdown(centered("Votes"), unsafe_allow_html=True)
+header_net.markdown(centered("Net Score"), unsafe_allow_html=True)
+header_vote.markdown(centered("Your vote"), unsafe_allow_html=True)
 st.markdown(
     f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
     unsafe_allow_html=True,
