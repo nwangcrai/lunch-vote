@@ -197,11 +197,20 @@ my_votes = get_my_votes(voter_name) if voter_name else {}
 
 COLUMN_RATIOS = [2, 4, 1, 2]
 
+
+def centered(text: str) -> str:
+    return f"<div style='text-align:center;'>{text}</div>"
+
+
 header_name, header_bar, header_net, header_vote = st.columns(COLUMN_RATIOS)
 header_name.markdown("**Restaurant**")
-header_bar.markdown("**Votes**")
-header_net.markdown("**Net Score**")
-header_vote.markdown("**Your vote**")
+header_bar.markdown(centered("**Votes**"), unsafe_allow_html=True)
+header_net.markdown(centered("**Net Score**"), unsafe_allow_html=True)
+header_vote.markdown(centered("**Your vote**"), unsafe_allow_html=True)
+st.markdown(
+    f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
+    unsafe_allow_html=True,
+)
 
 for _, row in results.iterrows():
     name = row["restaurant"]
@@ -214,7 +223,8 @@ for _, row in results.iterrows():
     col_name.markdown(f"**{name}**")
     with col_bar:
         render_diverging_bar(down_count, up_count, max_count)
-    col_net.markdown(f"{net_score:+d}" if net_score else "0")
+    net_label = f"{net_score:+d}" if net_score else "0"
+    col_net.markdown(centered(net_label), unsafe_allow_html=True)
 
     down_type = "primary" if current == "down" else "secondary"
     up_type = "primary" if current == "up" else "secondary"
