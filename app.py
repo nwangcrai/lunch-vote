@@ -230,20 +230,30 @@ st.markdown(
         background-color: {UP_COLOR_HOVER};
         border-color: {UP_COLOR_HOVER};
     }}
+    /* Pull the thumbs-up/thumbs-down buttons closer together instead of spanning
+    the full width of their column. */
+    [class*="st-key-votebtns_"] div[data-testid="stHorizontalBlock"] {{
+        gap: 0.25rem;
+        justify-content: center;
+    }}
+    [class*="st-key-votebtns_"] div[data-testid="stColumn"] {{
+        width: fit-content !important;
+        flex: none !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.title("DC Office Lunch Votes")
-st.caption(date.today().strftime("%A, %B %d, %Y") + " Presented by Al & Norman")
+st.caption(date.today().strftime("%A, %B %d, %Y") + " (by Norman & Alessandro)")
 
 st.text_input("Your Name", key="voter_name")
 voter_name = st.session_state["voter_name"]
 
 if not voter_name:
     st.info(
-        "Enter your name above to vote. Duplicates will be ignored, so please use your real name.",
+        "Enter your first name above to vote. (Duplicate names are ignored.)",
         icon=None,
     )
     st.markdown(
@@ -258,7 +268,10 @@ if not voter_name:
 st.subheader("Your Vote & Live Total Results")
 results = get_results()
 respondent_count = get_respondent_count()
-st.caption(f"{respondent_count} respondent(s) so far. Bars share one scale")
+st.caption(
+    f"{respondent_count} respondent(s) so far. Bars share one scale. "
+    "Restaurants are ranked automatically by their net score."
+)
 
 max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
 my_votes = get_my_votes(voter_name) if voter_name else {}
@@ -280,7 +293,7 @@ header_vote.markdown(
     "<div style='text-align:center; transform: translateX(-30px);'>Your Vote</div>",
     unsafe_allow_html=True,
 )
-header_bar.markdown(centered("Votes"), unsafe_allow_html=True)
+header_bar.markdown(centered("All Votes"), unsafe_allow_html=True)
 header_net.markdown(centered("Net Score", nowrap=True), unsafe_allow_html=True)
 st.markdown(
     f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
@@ -306,7 +319,9 @@ for _, row in results.iterrows():
     down_type = "primary" if current == "down" else "secondary"
     up_type = "primary" if current == "up" else "secondary"
 
-    col_down, col_up = col_vote.columns(2)
+    with col_vote:
+        with st.container(key=f"votebtns_{name}"):
+            col_down, col_up = st.columns(2)
     if col_down.button(" ", key=f"down_{name}", type=down_type, disabled=not voter_name):
         cast_vote(voter_name, name, "down")
         st.rerun()
@@ -317,12 +332,15 @@ for _, row in results.iterrows():
 if voter_name:
     st.caption("Click a thumb again to remove your vote.")
 
-with st.expander("Admin: reset votes"):
-    reset_password = st.text_input("Password", type="password", key="reset_password_input")
-    if st.button("Reset all votes"):
-        if reset_password and reset_password == st.secrets.get("reset_password"):
-            reset_all_votes()
-            st.success("All votes have been reset.")
-            st.rerun()
-        else:
-            st.error("Incorrect password.")
+# Hidden from normal visitors: only rendered when the URL has ?admin=1, so the reset
+# control isn't visible in the ordinary voting UI. Still password-gated underneath.
+if st.query_params.get("admin") == "1":
+    with st.expander("Admin: reset votes"):
+        reset_password = st.text_input("Password", type="password", key="reset_password_input")
+        if st.button("Reset all votes"):
+            if reset_password and reset_password == st.secrets.get("reset_password"):
+                reset_all_votes()
+                st.success("All votes have been reset.")
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
