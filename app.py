@@ -16,15 +16,22 @@ DB_PATH = Path(__file__).parent / "votes.db"
 RESTAURANTS_CSV = Path(__file__).parent / "restaurants.csv"
 THUMBS_UP_PNG = Path(__file__).parent / "thumbs_up.png"
 THUMBS_DOWN_PNG = Path(__file__).parent / "thumbs_down.png"
+BACKUPS_DIR = Path(__file__).parent / "backups"
 
 
+@st.cache_data
 def image_data_uri(path: Path) -> str:
     return f"data:image/png;base64,{base64.b64encode(path.read_bytes()).decode()}"
 
 
+@st.cache_resource
 def get_connection() -> sqlite3.Connection:
+    """Cached so the whole app (all sessions) shares one open connection instead of
+    opening/closing a new one per query, which was the main source of lag under
+    concurrent load. WAL mode lets reads proceed without blocking on writes."""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -59,6 +66,21 @@ def init_db() -> None:
             restaurant_id INTEGER NOT NULL REFERENCES restaurants(id),
             sentiment TEXT NOT NULL CHECK(sentiment IN ('up', 'down')),
             UNIQUE(voter_name, restaurant_id)
+        )
+        """
+    )
+
+    # Append-only audit trail: never dropped/cleared by reset_all_votes (or the schema-drop
+    # migration above), so vote history always survives an accidental or malicious reset.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vote_log (
+            id INTEGER PRIMARY KEY,
+            ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            voter_name TEXT,
+            restaurant_name TEXT,
+            action TEXT NOT NULL,
+            sentiment TEXT
         )
         """
     )
@@ -103,7 +125,13 @@ def init_db() -> None:
     )
 
     conn.commit()
-    conn.close()
+
+
+def _log(conn: sqlite3.Connection, voter_name: str | None, restaurant_name: str | None, action: str, sentiment: str | None) -> None:
+    conn.execute(
+        "INSERT INTO vote_log (voter_name, restaurant_name, action, sentiment) VALUES (?, ?, ?, ?)",
+        (voter_name, restaurant_name, action, sentiment),
+    )
 
 
 def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
@@ -124,6 +152,7 @@ def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
             "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ?",
             (voter_name, restaurant_id),
         )
+        _log(conn, voter_name, restaurant_name, "clear", sentiment)
     else:
         conn.execute(
             """
@@ -134,17 +163,52 @@ def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
             """,
             (voter_name, restaurant_id, sentiment),
         )
+        _log(conn, voter_name, restaurant_name, "set", sentiment)
     conn.commit()
-    conn.close()
+    get_results.clear()
+    get_respondent_count.clear()
+    get_my_votes.clear()
 
 
-def reset_all_votes() -> None:
+def backup_votes() -> Path:
+    """Snapshot the current votes table to a timestamped CSV before any destructive
+    operation, so a reset (accidental or malicious) is always recoverable by hand."""
     conn = get_connection()
+    df = pd.read_sql_query(
+        """
+        SELECT v.voter_name, r.name AS restaurant_name, v.sentiment
+        FROM votes v JOIN restaurants r ON r.id = v.restaurant_id
+        """,
+        conn,
+    )
+    BACKUPS_DIR.mkdir(exist_ok=True)
+    backup_path = BACKUPS_DIR / f"votes_{pd.Timestamp.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv"
+    df.to_csv(backup_path, index=False)
+    return backup_path
+
+
+def reset_all_votes() -> Path:
+    """Backs up all current votes to CSV and logs the reset (with a full row-by-row
+    record in vote_log, which reset never clears) before wiping the votes table."""
+    backup_path = backup_votes()
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT v.voter_name, r.name, v.sentiment FROM votes v
+        JOIN restaurants r ON r.id = v.restaurant_id
+        """
+    ).fetchall()
+    for voter_name, restaurant_name, sentiment in rows:
+        _log(conn, voter_name, restaurant_name, "reset", sentiment)
     conn.execute("DELETE FROM votes")
     conn.commit()
-    conn.close()
+    get_results.clear()
+    get_respondent_count.clear()
+    get_my_votes.clear()
+    return backup_path
 
 
+@st.cache_data(ttl=5)
 def get_my_votes(voter_name: str) -> dict[str, str]:
     conn = get_connection()
     rows = conn.execute(
@@ -155,17 +219,16 @@ def get_my_votes(voter_name: str) -> dict[str, str]:
         """,
         (voter_name,),
     ).fetchall()
-    conn.close()
     return dict(rows)
 
 
+@st.cache_data(ttl=5)
 def get_respondent_count() -> int:
     conn = get_connection()
-    count = conn.execute("SELECT COUNT(DISTINCT voter_name) FROM votes").fetchone()[0]
-    conn.close()
-    return count
+    return conn.execute("SELECT COUNT(DISTINCT voter_name) FROM votes").fetchone()[0]
 
 
+@st.cache_data(ttl=5)
 def get_results() -> pd.DataFrame:
     conn = get_connection()
     df = pd.read_sql_query(
@@ -181,7 +244,6 @@ def get_results() -> pd.DataFrame:
         """,
         conn,
     )
-    conn.close()
     df["net_score"] = df["thumbs_up"] - df["thumbs_down"]
     df["total_votes"] = df["thumbs_up"] + df["thumbs_down"]
     return df.sort_values(
@@ -367,11 +429,38 @@ if voter_name:
 # control isn't visible in the ordinary voting UI. Still password-gated underneath.
 if st.query_params.get("admin") == "1":
     with st.expander("Admin: reset votes"):
-        reset_password = st.text_input("Password", type="password", key="reset_password_input")
+        st.caption(
+            "A CSV backup of current votes is written to backups/ automatically before "
+            "any reset, and every vote (and reset) is permanently recorded in the "
+            "vote_log table regardless."
+        )
+        # The password/confirm fields are keyed on a nonce that bumps after every attempt
+        # (success or failure), forcing Streamlit to remount them as brand-new widgets.
+        # Deleting the old session_state entry alone isn't enough: the browser keeps
+        # showing (and resubmitting) its own last-typed value in the same DOM input, so a
+        # correct password typed once could be resubmitted just by clicking the button
+        # again with nothing retyped — that's what caused an undesired reset in production.
+        if "reset_form_nonce" not in st.session_state:
+            st.session_state["reset_form_nonce"] = 0
+        nonce = st.session_state["reset_form_nonce"]
+        reset_password = st.text_input(
+            "Password", type="password", key=f"reset_password_input_{nonce}"
+        )
+        confirm_phrase = st.text_input(
+            "Type RESET to confirm", key=f"reset_confirm_input_{nonce}"
+        )
         if st.button("Reset all votes"):
-            if reset_password and reset_password == st.secrets.get("reset_password"):
-                reset_all_votes()
-                st.success("All votes have been reset.")
+            password_ok = reset_password and reset_password == st.secrets.get("reset_password")
+            confirm_ok = confirm_phrase.strip() == "RESET"
+            # Bump the nonce so the password/confirm widgets remount blank on the next run
+            # (success or not) — but don't st.rerun() here on failure, since that would
+            # immediately discard this run's st.error() before the browser ever renders it.
+            st.session_state["reset_form_nonce"] += 1
+            if password_ok and confirm_ok:
+                backup_path = reset_all_votes()
+                st.success(f"All votes have been reset. Backup saved to {backup_path.name}.")
                 st.rerun()
-            else:
+            elif not password_ok:
                 st.error("Incorrect password.")
+            else:
+                st.error('Type "RESET" exactly to confirm.')

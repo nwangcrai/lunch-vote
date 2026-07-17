@@ -2,5 +2,6 @@ __pycache__/
 *.pyc
 *.log
 votes.db
+backups/
 CLAUDE.md
 .streamlit/secrets.toml
