@@ -470,3 +470,28 @@ if st.query_params.get("admin") == "1":
                 st.error("Incorrect password.")
             else:
                 st.error('Type "RESET" exactly to confirm.')
+
+    # Read-only, so no RESET confirm phrase needed — just the password. This is what
+    # actually lets you recover from an accidental reset: vote_log and the CSV backups
+    # only survive an in-app reset, not a Streamlit Cloud redeploy/restart (ephemeral
+    # filesystem), so download a copy here before that happens rather than after.
+    with st.expander("Admin: view / download vote log"):
+        log_password = st.text_input(
+            "Password", type="password", key="log_password_input"
+        )
+        if log_password:
+            if log_password == st.secrets.get("reset_password"):
+                conn = get_connection()
+                log_df = pd.read_sql_query(
+                    "SELECT * FROM vote_log ORDER BY id DESC", conn
+                )
+                st.caption(f"{len(log_df)} row(s) in vote_log.")
+                st.dataframe(log_df, use_container_width=True)
+                st.download_button(
+                    "Download vote_log.csv",
+                    log_df.to_csv(index=False),
+                    file_name="vote_log.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("Incorrect password.")
