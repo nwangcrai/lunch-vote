@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 UP_COLOR = "#008300"
 UP_COLOR_HOVER = "#006b00"
@@ -299,7 +300,7 @@ st.markdown(
         background-color: {UP_COLOR_HOVER};
         border-color: {UP_COLOR_HOVER};
     }}
-    /* Pull the thumbs-up/skip/thumbs-down buttons closer together instead of spanning
+    /* Pull the thumbs-up/thumbs-down buttons closer together instead of spanning
     the full width of their column. */
     [class*="st-key-votebtns_"] div[data-testid="stHorizontalBlock"] {{
         gap: 0.25rem;
@@ -312,6 +313,51 @@ st.markdown(
     </style>
     """,
     unsafe_allow_html=True,
+)
+
+# Keyboard shortcuts for the voting wizard: Up/Down arrows cast a vote, Enter advances.
+# st.markdown can't run <script> tags -- Streamlit renders markdown via React's
+# dangerouslySetInnerHTML, and browsers never execute <script> elements inserted through
+# innerHTML. st.components.v1.html() renders into a real iframe document instead, where
+# scripts do execute; the listener then reaches into window.parent.document (the actual
+# app page, one frame up) to find and click buttons. Streamlit fully replaces the DOM on
+# every rerun, so button elements can't be cached -- each keypress re-queries for whichever
+# up/down/next button is currently on screen (there's only ever one of each at a time, so
+# the same substring selectors the CSS above uses work here too). The listener itself is
+# attached once to the parent document (guarded by a flag on window.parent) rather than
+# re-attached every rerun, since this component iframe is recreated each render but the
+# parent document persists across reruns.
+components.html(
+    """
+    <script>
+    if (!window.parent.__lunchVoteKeysBound) {
+        window.parent.__lunchVoteKeysBound = true;
+        window.parent.document.addEventListener('keydown', function(e) {
+            var tag = (e.target && e.target.tagName || '').toLowerCase();
+            if (tag === 'input' || tag === 'textarea') return;
+
+            var doc = window.parent.document;
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                var sel = e.key === 'ArrowUp'
+                    ? '[class*="st-key-up_"] button'
+                    : '[class*="st-key-down_"] button';
+                var btn = doc.querySelector(sel);
+                if (btn && !btn.disabled) {
+                    e.preventDefault();
+                    btn.click();
+                }
+            } else if (e.key === 'Enter') {
+                var next = doc.querySelector('.st-key-next_btn button');
+                if (next && !next.disabled) {
+                    e.preventDefault();
+                    next.click();
+                }
+            }
+        });
+    }
+    </script>
+    """,
+    height=0,
 )
 
 st.title("DC Office Lunch Votes")
@@ -389,12 +435,9 @@ else:
         current = st.session_state["staged_votes"].get(name)
 
         with st.container(key=f"votebtns_{name}"):
-            col_down, col_skip, col_up = st.columns(3)
+            col_down, col_up = st.columns(2)
         if col_down.button(" ", key=f"down_{name}", type="primary" if current == "down" else "secondary"):
             st.session_state["staged_votes"][name] = "down"
-            st.rerun()
-        if col_skip.button("No opinion", key=f"skip_{name}", type="primary" if current is None else "secondary"):
-            st.session_state["staged_votes"][name] = None
             st.rerun()
         if col_up.button(" ", key=f"up_{name}", type="primary" if current == "up" else "secondary"):
             st.session_state["staged_votes"][name] = "up"
@@ -404,7 +447,7 @@ else:
         if col_back.button("Back", disabled=step == 0):
             st.session_state["wizard_step"] -= 1
             st.rerun()
-        if col_next.button("Next", type="primary"):
+        if col_next.button("Next", key="next_btn", type="primary", disabled=current is None):
             st.session_state["wizard_step"] += 1
             st.rerun()
     else:
