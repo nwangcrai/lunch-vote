@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-from streamlit_autorefresh import st_autorefresh
 
 UP_COLOR = "#008300"
 UP_COLOR_HOVER = "#006b00"
@@ -18,6 +17,8 @@ RESTAURANTS_CSV = Path(__file__).parent / "restaurants.csv"
 THUMBS_UP_PNG = Path(__file__).parent / "thumbs_up.png"
 THUMBS_DOWN_PNG = Path(__file__).parent / "thumbs_down.png"
 BACKUPS_DIR = Path(__file__).parent / "backups"
+
+SENTIMENT_LABELS = {"up": "Thumbs up", "down": "Thumbs down", None: "No opinion"}
 
 
 @st.cache_data
@@ -135,36 +136,39 @@ def _log(conn: sqlite3.Connection, voter_name: str | None, restaurant_name: str 
     )
 
 
-def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
-    """Upsert a thumbs up/down vote. Voting the same sentiment again clears it (toggle off).
-    Votes are permanent (one per person per restaurant) until an admin reset clears the table."""
+def submit_votes(voter_name: str, staged_votes: dict[str, str | None]) -> None:
+    """Writes a full wizard submission in one pass, diffed against the voter's existing
+    votes: unchanged answers are skipped, answers reverted to "no opinion" delete the
+    prior row, and new/changed up-down answers upsert. Unlike the old per-click
+    cast_vote() (a toggle relative to current DB state), this sets each restaurant to
+    exactly what the wizard says, independent of what was there before."""
     conn = get_connection()
-    restaurant_id = conn.execute(
-        "SELECT id FROM restaurants WHERE name = ?", (restaurant_name,)
-    ).fetchone()[0]
+    prior_votes = get_my_votes(voter_name)
+    restaurant_ids = dict(conn.execute("SELECT name, id FROM restaurants").fetchall())
 
-    existing = conn.execute(
-        "SELECT sentiment FROM votes WHERE voter_name = ? AND restaurant_id = ?",
-        (voter_name, restaurant_id),
-    ).fetchone()
+    for name, sentiment in staged_votes.items():
+        prior = prior_votes.get(name)
+        if sentiment == prior:
+            continue
+        restaurant_id = restaurant_ids[name]
+        if sentiment is None:
+            conn.execute(
+                "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ?",
+                (voter_name, restaurant_id),
+            )
+            _log(conn, voter_name, name, "clear", prior)
+        else:
+            conn.execute(
+                """
+                INSERT INTO votes (voter_name, restaurant_id, sentiment)
+                VALUES (?, ?, ?)
+                ON CONFLICT(voter_name, restaurant_id)
+                DO UPDATE SET sentiment = excluded.sentiment
+                """,
+                (voter_name, restaurant_id, sentiment),
+            )
+            _log(conn, voter_name, name, "set", sentiment)
 
-    if existing and existing[0] == sentiment:
-        conn.execute(
-            "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ?",
-            (voter_name, restaurant_id),
-        )
-        _log(conn, voter_name, restaurant_name, "clear", sentiment)
-    else:
-        conn.execute(
-            """
-            INSERT INTO votes (voter_name, restaurant_id, sentiment)
-            VALUES (?, ?, ?)
-            ON CONFLICT(voter_name, restaurant_id)
-            DO UPDATE SET sentiment = excluded.sentiment
-            """,
-            (voter_name, restaurant_id, sentiment),
-        )
-        _log(conn, voter_name, restaurant_name, "set", sentiment)
     conn.commit()
     get_results.clear()
     get_respondent_count.clear()
@@ -250,36 +254,9 @@ def get_results() -> pd.DataFrame:
     return df
 
 
-def render_diverging_bar(down_count: int, up_count: int, max_count: int) -> None:
-    """A center-anchored HTML bar: red (down) grows left, green (up) grows right,
-    scaled against max_count so every restaurant's row shares one axis."""
-    down_pct = (down_count / max_count * 50) if max_count else 0
-    up_pct = (up_count / max_count * 50) if max_count else 0
-    down_label = str(down_count) if down_count else ""
-    up_label = str(up_count) if up_count else ""
-
-    st.markdown(
-        f"""
-        <div style="display:flex; align-items:center; height:38px;">
-          <div style="flex:1; display:flex; justify-content:flex-end; align-items:center;">
-            <span style="margin-right:6px; color:{MUTED_COLOR}; font-size:13px;">{down_label}</span>
-            <div style="width:{down_pct}%; height:14px; background:{DOWN_COLOR}; border-radius:3px 0 0 3px;"></div>
-          </div>
-          <div style="width:2px; height:22px; background:{MUTED_COLOR}; flex-shrink:0;"></div>
-          <div style="flex:1; display:flex; justify-content:flex-start; align-items:center;">
-            <div style="width:{up_pct}%; height:14px; background:{UP_COLOR}; border-radius:0 3px 3px 0;"></div>
-            <span style="margin-left:6px; color:{MUTED_COLOR}; font-size:13px;">{up_label}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 init_db()
 
-st.set_page_config(page_title="Lunch Vote", page_icon="🍽️", layout="wide")
-st_autorefresh(interval=7_000, key="lunch_vote_refresh")
+st.set_page_config(page_title="Lunch Vote", page_icon="\U0001f37d️", layout="wide")
 
 # Use more of the page width instead of Streamlit's default centered, margin-heavy layout.
 st.markdown(
@@ -322,7 +299,7 @@ st.markdown(
         background-color: {UP_COLOR_HOVER};
         border-color: {UP_COLOR_HOVER};
     }}
-    /* Pull the thumbs-up/thumbs-down buttons closer together instead of spanning
+    /* Pull the thumbs-up/skip/thumbs-down buttons closer together instead of spanning
     the full width of their column. */
     [class*="st-key-votebtns_"] div[data-testid="stHorizontalBlock"] {{
         gap: 0.25rem;
@@ -340,100 +317,162 @@ st.markdown(
 st.title("DC Office Lunch Votes")
 st.caption(date.today().strftime("%A, %B %d, %Y") + " (by Norman & Alessandro)")
 
-st.text_input("Your Name", key="voter_name")
-voter_name = st.session_state["voter_name"]
-
-if not voter_name:
-    st.info(
-        "Enter your first name above to vote. (Duplicate names are ignored.)",
-        icon=None,
-    )
-    st.markdown(
-        """
-        <style>
-        [data-testid="stAlertContainer"] p { font-size: 14px; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-st.subheader("Your Vote & Live Total Results")
-results = get_results()
-respondent_count = get_respondent_count()
-st.caption(
-    f"{respondent_count} respondent(s) so far. Bars share one scale. "
-    "Restaurant order is randomized per session to avoid bias toward whatever's currently winning."
-)
-
-# get_results() is cached and shared across all sessions, so shuffling has to happen here
-# (not inside it) or every session would see the same order. Seeding once per session keeps
-# the order stable across this session's autorefreshes instead of jumping around every 7s.
 if "shuffle_seed" not in st.session_state:
     st.session_state["shuffle_seed"] = random.randint(0, 2**31 - 1)
-results = results.sample(frac=1, random_state=st.session_state["shuffle_seed"]).reset_index(drop=True)
 
-max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
-my_votes = get_my_votes(voter_name) if voter_name else {}
-
-COLUMN_RATIOS = [3, 3, 2, 4, 1]
-
-
-def centered(text: str, nowrap: bool = False) -> str:
-    style = "text-align:center;"
-    if nowrap:
-        style += " white-space:nowrap;"
-    return f"<div style='{style}'>{text}</div>"
-
-
-header_name, header_desc, header_vote, header_bar, header_net = st.columns(COLUMN_RATIOS)
-header_name.markdown("<div style='white-space:nowrap;'>Restaurant</div>", unsafe_allow_html=True)
-header_desc.markdown("Description")
-header_vote.markdown(
-    "<div style='text-align:center; transform: translateX(-2px);'>Your Vote</div>",
-    unsafe_allow_html=True,
+all_restaurants = pd.read_sql_query(
+    "SELECT name, description FROM restaurants", get_connection()
 )
-header_bar.markdown(centered("All Votes"), unsafe_allow_html=True)
-header_net.markdown(centered("Net Score", nowrap=True), unsafe_allow_html=True)
-st.markdown(
-    f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
-    unsafe_allow_html=True,
+restaurant_order = list(
+    all_restaurants.sample(frac=1, random_state=st.session_state["shuffle_seed"])[
+        ["name", "description"]
+    ].itertuples(index=False, name=None)
 )
+num_restaurants = len(restaurant_order)
 
-for _, row in results.iterrows():
-    name = row["restaurant"]
-    description = row["description"]
-    down_count = int(row["thumbs_down"])
-    up_count = int(row["thumbs_up"])
-    net_score = int(row["net_score"])
-    current = my_votes.get(name)
+st.session_state.setdefault("wizard_name_confirmed", False)
+st.session_state.setdefault("wizard_step", 0)
+st.session_state.setdefault("wizard_submitted", False)
+st.session_state.setdefault("staged_votes", {})
 
-    col_name, col_desc, col_vote, col_bar, col_net = st.columns(COLUMN_RATIOS)
-    col_name.markdown(f"<div style='white-space:nowrap;'><strong>{name}</strong></div>", unsafe_allow_html=True)
-    col_desc.markdown(description)
-    with col_bar:
-        render_diverging_bar(down_count, up_count, max_count)
-    net_label = f"{net_score:+d}" if net_score else "0"
-    col_net.markdown(centered(net_label, nowrap=True), unsafe_allow_html=True)
 
-    down_type = "primary" if current == "down" else "secondary"
-    up_type = "primary" if current == "up" else "secondary"
+def start_wizard(name: str) -> None:
+    # Stored separately from the "voter_name" widget key: Streamlit drops widget-backed
+    # session_state entries once their widget stops being rendered (the name text_input
+    # only renders on the name screen), so reading st.session_state["voter_name"] again
+    # from later screens would KeyError.
+    prior_votes = get_my_votes(name)
+    st.session_state["confirmed_voter_name"] = name
+    st.session_state["staged_votes"] = {
+        restaurant_name: prior_votes.get(restaurant_name)
+        for restaurant_name, _ in restaurant_order
+    }
+    st.session_state["wizard_name_confirmed"] = True
+    st.session_state["wizard_step"] = 0
+    st.session_state["wizard_submitted"] = False
 
-    with col_vote:
+
+if not st.session_state["wizard_name_confirmed"]:
+    st.text_input("Your Name", key="voter_name")
+    st.caption("Duplicate first names are treated as the same person.")
+    if st.button("Start", type="primary"):
+        name = st.session_state.get("voter_name", "").strip()
+        if name:
+            start_wizard(name)
+            st.rerun()
+        else:
+            st.error("Enter your first name to start.")
+
+elif st.session_state["wizard_submitted"]:
+    st.success("Thanks! Your votes are recorded.")
+    if st.button("Edit my answers again"):
+        st.session_state["wizard_submitted"] = False
+        st.session_state["wizard_step"] = 0
+        st.rerun()
+
+else:
+    voter_name = st.session_state["confirmed_voter_name"]
+
+    if st.button("Not you? Change name"):
+        st.session_state["wizard_name_confirmed"] = False
+        st.rerun()
+
+    step = st.session_state["wizard_step"]
+
+    if step < num_restaurants:
+        name, description = restaurant_order[step]
+        st.progress((step + 1) / num_restaurants)
+        st.caption(f"{step + 1} of {num_restaurants}")
+        st.subheader(name)
+        st.write(description)
+
+        current = st.session_state["staged_votes"].get(name)
+
         with st.container(key=f"votebtns_{name}"):
-            col_down, col_up = st.columns(2)
-    if col_down.button(" ", key=f"down_{name}", type=down_type, disabled=not voter_name):
-        cast_vote(voter_name, name, "down")
-        st.rerun()
-    if col_up.button(" ", key=f"up_{name}", type=up_type, disabled=not voter_name):
-        cast_vote(voter_name, name, "up")
-        st.rerun()
+            col_down, col_skip, col_up = st.columns(3)
+        if col_down.button(" ", key=f"down_{name}", type="primary" if current == "down" else "secondary"):
+            st.session_state["staged_votes"][name] = "down"
+            st.rerun()
+        if col_skip.button("No opinion", key=f"skip_{name}", type="primary" if current is None else "secondary"):
+            st.session_state["staged_votes"][name] = None
+            st.rerun()
+        if col_up.button(" ", key=f"up_{name}", type="primary" if current == "up" else "secondary"):
+            st.session_state["staged_votes"][name] = "up"
+            st.rerun()
 
-if voter_name:
-    st.caption("Click a thumb again to remove your vote.")
+        col_back, _, col_next = st.columns([1, 3, 1])
+        if col_back.button("Back", disabled=step == 0):
+            st.session_state["wizard_step"] -= 1
+            st.rerun()
+        if col_next.button("Next", type="primary"):
+            st.session_state["wizard_step"] += 1
+            st.rerun()
+    else:
+        st.subheader("Review your picks")
+        for name, _ in restaurant_order:
+            sentiment = st.session_state["staged_votes"].get(name)
+            st.markdown(f"**{name}** — {SENTIMENT_LABELS[sentiment]}")
 
-# Hidden from normal visitors: only rendered when the URL has ?admin=1, so the reset
-# control isn't visible in the ordinary voting UI. Still password-gated underneath.
+        col_back, _, col_submit = st.columns([1, 3, 1])
+        if col_back.button("Back"):
+            st.session_state["wizard_step"] = num_restaurants - 1
+            st.rerun()
+        if col_submit.button("Submit", type="primary"):
+            submit_votes(voter_name, st.session_state["staged_votes"])
+            st.session_state["wizard_submitted"] = True
+            st.rerun()
+
+# Hidden from normal visitors: only rendered when the URL has ?admin=1, so the admin
+# controls aren't visible in the ordinary voting UI. Still password-gated underneath.
 if st.query_params.get("admin") == "1":
+    with st.expander("Admin: view results"):
+        results_password = st.text_input(
+            "Password", type="password", key="results_password_input"
+        )
+        if results_password:
+            if results_password == st.secrets.get("reset_password"):
+                results_df = get_results().sort_values("net_score", ascending=False)
+                st.caption(f"{get_respondent_count()} respondent(s) so far.")
+                st.dataframe(results_df, use_container_width=True)
+                st.download_button(
+                    "Download results.csv",
+                    results_df.to_csv(index=False),
+                    file_name="results.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("Incorrect password.")
+
+    with st.expander("Admin: view / download vote log"):
+        st.caption(
+            "A CSV backup of current votes is written to backups/ automatically before "
+            "any reset, and every vote (and reset) is permanently recorded in the "
+            "vote_log table regardless."
+        )
+        # Read-only, so no RESET confirm phrase needed — just the password. This is what
+        # actually lets you recover from an accidental reset: vote_log and the CSV backups
+        # only survive an in-app reset, not a Streamlit Cloud redeploy/restart (ephemeral
+        # filesystem), so download a copy here before that happens rather than after.
+        log_password = st.text_input(
+            "Password", type="password", key="log_password_input"
+        )
+        if log_password:
+            if log_password == st.secrets.get("reset_password"):
+                conn = get_connection()
+                log_df = pd.read_sql_query(
+                    "SELECT * FROM vote_log ORDER BY id DESC", conn
+                )
+                st.caption(f"{len(log_df)} row(s) in vote_log.")
+                st.dataframe(log_df, use_container_width=True)
+                st.download_button(
+                    "Download vote_log.csv",
+                    log_df.to_csv(index=False),
+                    file_name="vote_log.csv",
+                    mime="text/csv",
+                )
+            else:
+                st.error("Incorrect password.")
+
     with st.expander("Admin: reset votes"):
         st.caption(
             "A CSV backup of current votes is written to backups/ automatically before "
@@ -470,28 +509,3 @@ if st.query_params.get("admin") == "1":
                 st.error("Incorrect password.")
             else:
                 st.error('Type "RESET" exactly to confirm.')
-
-    # Read-only, so no RESET confirm phrase needed — just the password. This is what
-    # actually lets you recover from an accidental reset: vote_log and the CSV backups
-    # only survive an in-app reset, not a Streamlit Cloud redeploy/restart (ephemeral
-    # filesystem), so download a copy here before that happens rather than after.
-    with st.expander("Admin: view / download vote log"):
-        log_password = st.text_input(
-            "Password", type="password", key="log_password_input"
-        )
-        if log_password:
-            if log_password == st.secrets.get("reset_password"):
-                conn = get_connection()
-                log_df = pd.read_sql_query(
-                    "SELECT * FROM vote_log ORDER BY id DESC", conn
-                )
-                st.caption(f"{len(log_df)} row(s) in vote_log.")
-                st.dataframe(log_df, use_container_width=True)
-                st.download_button(
-                    "Download vote_log.csv",
-                    log_df.to_csv(index=False),
-                    file_name="vote_log.csv",
-                    mime="text/csv",
-                )
-            else:
-                st.error("Incorrect password.")
