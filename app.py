@@ -362,6 +362,7 @@ components.html(
 
 st.title("DC Office Lunch Votes")
 st.caption(date.today().strftime("%A, %B %d, %Y") + " (by Norman & Alessandro)")
+st.header("Up arrow for thumbs up, down arrow for thumbs down", divider=False)
 
 if "shuffle_seed" not in st.session_state:
     st.session_state["shuffle_seed"] = random.randint(0, 2**31 - 1)
@@ -450,6 +451,7 @@ else:
         if col_next.button("Next", key="next_btn", type="primary", disabled=current is None):
             st.session_state["wizard_step"] += 1
             st.rerun()
+        col_next.caption("Press Enter to go to next question")
     else:
         st.subheader("Review your picks")
         for name, _ in restaurant_order:
