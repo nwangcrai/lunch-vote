@@ -1,4 +1,5 @@
 import base64
+import random
 import sqlite3
 from datetime import date
 from pathlib import Path
@@ -246,9 +247,7 @@ def get_results() -> pd.DataFrame:
     )
     df["net_score"] = df["thumbs_up"] - df["thumbs_down"]
     df["total_votes"] = df["thumbs_up"] + df["thumbs_down"]
-    return df.sort_values(
-        ["net_score", "total_votes"], ascending=False
-    ).reset_index(drop=True)
+    return df
 
 
 def render_diverging_bar(down_count: int, up_count: int, max_count: int) -> None:
@@ -363,8 +362,15 @@ results = get_results()
 respondent_count = get_respondent_count()
 st.caption(
     f"{respondent_count} respondent(s) so far. Bars share one scale. "
-    "Restaurants are ranked automatically by their net score."
+    "Restaurant order is randomized per session to avoid bias toward whatever's currently winning."
 )
+
+# get_results() is cached and shared across all sessions, so shuffling has to happen here
+# (not inside it) or every session would see the same order. Seeding once per session keeps
+# the order stable across this session's autorefreshes instead of jumping around every 7s.
+if "shuffle_seed" not in st.session_state:
+    st.session_state["shuffle_seed"] = random.randint(0, 2**31 - 1)
+results = results.sample(frac=1, random_state=st.session_state["shuffle_seed"]).reset_index(drop=True)
 
 max_count = max(int(results["thumbs_up"].max()), int(results["thumbs_down"].max()), 1)
 my_votes = get_my_votes(voter_name) if voter_name else {}
