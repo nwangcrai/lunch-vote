@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 
 UP_COLOR = "#008300"
 UP_COLOR_HOVER = "#006b00"
@@ -18,8 +17,6 @@ RESTAURANTS_CSV = Path(__file__).parent / "restaurants.csv"
 THUMBS_UP_PNG = Path(__file__).parent / "thumbs_up.png"
 THUMBS_DOWN_PNG = Path(__file__).parent / "thumbs_down.png"
 BACKUPS_DIR = Path(__file__).parent / "backups"
-
-SENTIMENT_LABELS = {"up": "Thumbs up", "down": "Thumbs down", None: "No opinion"}
 
 
 @st.cache_data
@@ -137,39 +134,36 @@ def _log(conn: sqlite3.Connection, voter_name: str | None, restaurant_name: str 
     )
 
 
-def submit_votes(voter_name: str, staged_votes: dict[str, str | None]) -> None:
-    """Writes a full wizard submission in one pass, diffed against the voter's existing
-    votes: unchanged answers are skipped, answers reverted to "no opinion" delete the
-    prior row, and new/changed up-down answers upsert. Unlike the old per-click
-    cast_vote() (a toggle relative to current DB state), this sets each restaurant to
-    exactly what the wizard says, independent of what was there before."""
+def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
+    """Upsert a thumbs up/down vote. Voting the same sentiment again clears it (toggle off).
+    Votes are permanent (one per person per restaurant) until an admin reset clears the table."""
     conn = get_connection()
-    prior_votes = get_my_votes(voter_name)
-    restaurant_ids = dict(conn.execute("SELECT name, id FROM restaurants").fetchall())
+    restaurant_id = conn.execute(
+        "SELECT id FROM restaurants WHERE name = ?", (restaurant_name,)
+    ).fetchone()[0]
 
-    for name, sentiment in staged_votes.items():
-        prior = prior_votes.get(name)
-        if sentiment == prior:
-            continue
-        restaurant_id = restaurant_ids[name]
-        if sentiment is None:
-            conn.execute(
-                "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ?",
-                (voter_name, restaurant_id),
-            )
-            _log(conn, voter_name, name, "clear", prior)
-        else:
-            conn.execute(
-                """
-                INSERT INTO votes (voter_name, restaurant_id, sentiment)
-                VALUES (?, ?, ?)
-                ON CONFLICT(voter_name, restaurant_id)
-                DO UPDATE SET sentiment = excluded.sentiment
-                """,
-                (voter_name, restaurant_id, sentiment),
-            )
-            _log(conn, voter_name, name, "set", sentiment)
+    existing = conn.execute(
+        "SELECT sentiment FROM votes WHERE voter_name = ? AND restaurant_id = ?",
+        (voter_name, restaurant_id),
+    ).fetchone()
 
+    if existing and existing[0] == sentiment:
+        conn.execute(
+            "DELETE FROM votes WHERE voter_name = ? AND restaurant_id = ?",
+            (voter_name, restaurant_id),
+        )
+        _log(conn, voter_name, restaurant_name, "clear", sentiment)
+    else:
+        conn.execute(
+            """
+            INSERT INTO votes (voter_name, restaurant_id, sentiment)
+            VALUES (?, ?, ?)
+            ON CONFLICT(voter_name, restaurant_id)
+            DO UPDATE SET sentiment = excluded.sentiment
+            """,
+            (voter_name, restaurant_id, sentiment),
+        )
+        _log(conn, voter_name, restaurant_name, "set", sentiment)
     conn.commit()
     get_results.clear()
     get_respondent_count.clear()
@@ -255,6 +249,13 @@ def get_results() -> pd.DataFrame:
     return df
 
 
+def centered(text: str, nowrap: bool = False) -> str:
+    style = "text-align:center;"
+    if nowrap:
+        style += " white-space:nowrap;"
+    return f"<div style='{style}'>{text}</div>"
+
+
 init_db()
 
 st.set_page_config(page_title="Lunch Vote", page_icon="\U0001f37d️", layout="wide")
@@ -315,54 +316,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Keyboard shortcuts for the voting wizard: Up/Down arrows cast a vote, Enter advances.
-# st.markdown can't run <script> tags -- Streamlit renders markdown via React's
-# dangerouslySetInnerHTML, and browsers never execute <script> elements inserted through
-# innerHTML. st.components.v1.html() renders into a real iframe document instead, where
-# scripts do execute; the listener then reaches into window.parent.document (the actual
-# app page, one frame up) to find and click buttons. Streamlit fully replaces the DOM on
-# every rerun, so button elements can't be cached -- each keypress re-queries for whichever
-# up/down/next button is currently on screen (there's only ever one of each at a time, so
-# the same substring selectors the CSS above uses work here too). The listener itself is
-# attached once to the parent document (guarded by a flag on window.parent) rather than
-# re-attached every rerun, since this component iframe is recreated each render but the
-# parent document persists across reruns.
-components.html(
-    """
-    <script>
-    if (!window.parent.__lunchVoteKeysBound) {
-        window.parent.__lunchVoteKeysBound = true;
-        window.parent.document.addEventListener('keydown', function(e) {
-            var tag = (e.target && e.target.tagName || '').toLowerCase();
-            if (tag === 'input' || tag === 'textarea') return;
-
-            var doc = window.parent.document;
-            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-                var sel = e.key === 'ArrowUp'
-                    ? '[class*="st-key-up_"] button'
-                    : '[class*="st-key-down_"] button';
-                var btn = doc.querySelector(sel);
-                if (btn && !btn.disabled) {
-                    e.preventDefault();
-                    btn.click();
-                }
-            } else if (e.key === 'Enter') {
-                var next = doc.querySelector('.st-key-next_btn button');
-                if (next && !next.disabled) {
-                    e.preventDefault();
-                    next.click();
-                }
-            }
-        });
-    }
-    </script>
-    """,
-    height=0,
-)
-
 st.title("DC Office Lunch Votes")
 st.caption(date.today().strftime("%A, %B %d, %Y") + " (by Norman & Alessandro)")
-st.header("Up arrow for thumbs up, down arrow for thumbs down", divider=False)
+
+st.text_input("Your Name", key="voter_name")
+voter_name = st.session_state["voter_name"]
+
+if not voter_name:
+    st.info(
+        "Enter your first name above to vote. (Duplicate names are ignored.)",
+        icon=None,
+    )
+    st.markdown(
+        """
+        <style>
+        [data-testid="stAlertContainer"] p { font-size: 14px; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 if "shuffle_seed" not in st.session_state:
     st.session_state["shuffle_seed"] = random.randint(0, 2**31 - 1)
@@ -375,97 +347,45 @@ restaurant_order = list(
         ["name", "description"]
     ].itertuples(index=False, name=None)
 )
-num_restaurants = len(restaurant_order)
 
-st.session_state.setdefault("wizard_name_confirmed", False)
-st.session_state.setdefault("wizard_step", 0)
-st.session_state.setdefault("wizard_submitted", False)
-st.session_state.setdefault("staged_votes", {})
+my_votes = get_my_votes(voter_name) if voter_name else {}
 
+COLUMN_RATIOS = [3, 6, 2]
 
-def start_wizard(name: str) -> None:
-    # Stored separately from the "voter_name" widget key: Streamlit drops widget-backed
-    # session_state entries once their widget stops being rendered (the name text_input
-    # only renders on the name screen), so reading st.session_state["voter_name"] again
-    # from later screens would KeyError.
-    prior_votes = get_my_votes(name)
-    st.session_state["confirmed_voter_name"] = name
-    st.session_state["staged_votes"] = {
-        restaurant_name: prior_votes.get(restaurant_name)
-        for restaurant_name, _ in restaurant_order
-    }
-    st.session_state["wizard_name_confirmed"] = True
-    st.session_state["wizard_step"] = 0
-    st.session_state["wizard_submitted"] = False
+header_name, header_desc, header_vote = st.columns(COLUMN_RATIOS)
+header_name.markdown("<div style='white-space:nowrap;'>Restaurant</div>", unsafe_allow_html=True)
+header_desc.markdown("Description")
+header_vote.markdown(
+    "<div style='text-align:center; transform: translateX(-2px);'>Your Vote</div>",
+    unsafe_allow_html=True,
+)
+st.markdown(
+    f"<hr style='margin:2px 0 8px 0; border:none; border-top:1px solid {MUTED_COLOR};'>",
+    unsafe_allow_html=True,
+)
 
+for name, description in restaurant_order:
+    current = my_votes.get(name)
 
-if not st.session_state["wizard_name_confirmed"]:
-    st.text_input("Your Name", key="voter_name")
-    st.caption("Duplicate first names are treated as the same person.")
-    if st.button("Start", type="primary"):
-        name = st.session_state.get("voter_name", "").strip()
-        if name:
-            start_wizard(name)
-            st.rerun()
-        else:
-            st.error("Enter your first name to start.")
+    col_name, col_desc, col_vote = st.columns(COLUMN_RATIOS)
+    col_name.markdown(f"<div style='white-space:nowrap;'><strong>{name}</strong></div>", unsafe_allow_html=True)
+    col_desc.markdown(description)
 
-elif st.session_state["wizard_submitted"]:
-    st.success("Thanks! Your votes are recorded.")
-    if st.button("Edit my answers again"):
-        st.session_state["wizard_submitted"] = False
-        st.session_state["wizard_step"] = 0
-        st.rerun()
+    down_type = "primary" if current == "down" else "secondary"
+    up_type = "primary" if current == "up" else "secondary"
 
-else:
-    voter_name = st.session_state["confirmed_voter_name"]
-
-    if st.button("Not you? Change name"):
-        st.session_state["wizard_name_confirmed"] = False
-        st.rerun()
-
-    step = st.session_state["wizard_step"]
-
-    if step < num_restaurants:
-        name, description = restaurant_order[step]
-        st.progress((step + 1) / num_restaurants)
-        st.caption(f"{step + 1} of {num_restaurants}")
-        st.subheader(name)
-        st.write(description)
-
-        current = st.session_state["staged_votes"].get(name)
-
+    with col_vote:
         with st.container(key=f"votebtns_{name}"):
             col_down, col_up = st.columns(2)
-        if col_down.button(" ", key=f"down_{name}", type="primary" if current == "down" else "secondary"):
-            st.session_state["staged_votes"][name] = "down"
-            st.rerun()
-        if col_up.button(" ", key=f"up_{name}", type="primary" if current == "up" else "secondary"):
-            st.session_state["staged_votes"][name] = "up"
-            st.rerun()
+    if col_down.button(" ", key=f"down_{name}", type=down_type, disabled=not voter_name):
+        cast_vote(voter_name, name, "down")
+        st.rerun()
+    if col_up.button(" ", key=f"up_{name}", type=up_type, disabled=not voter_name):
+        cast_vote(voter_name, name, "up")
+        st.rerun()
 
-        col_back, _, col_next = st.columns([1, 3, 1])
-        if col_back.button("Back", disabled=step == 0):
-            st.session_state["wizard_step"] -= 1
-            st.rerun()
-        if col_next.button("Next", key="next_btn", type="primary", disabled=current is None):
-            st.session_state["wizard_step"] += 1
-            st.rerun()
-        col_next.caption("Press Enter to go to next question")
-    else:
-        st.subheader("Review your picks")
-        for name, _ in restaurant_order:
-            sentiment = st.session_state["staged_votes"].get(name)
-            st.markdown(f"**{name}** — {SENTIMENT_LABELS[sentiment]}")
-
-        col_back, _, col_submit = st.columns([1, 3, 1])
-        if col_back.button("Back"):
-            st.session_state["wizard_step"] = num_restaurants - 1
-            st.rerun()
-        if col_submit.button("Submit", type="primary"):
-            submit_votes(voter_name, st.session_state["staged_votes"])
-            st.session_state["wizard_submitted"] = True
-            st.rerun()
+if voter_name:
+    st.caption("Click a thumb again to remove your vote.")
 
 # Hidden from normal visitors: only rendered when the URL has ?admin=1, so the admin
 # controls aren't visible in the ordinary voting UI. Still password-gated underneath.
