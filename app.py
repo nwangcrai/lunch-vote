@@ -260,6 +260,20 @@ init_db()
 
 st.set_page_config(page_title="Lunch Vote", page_icon="\U0001f37d️", layout="wide")
 
+# Century Gothic isn't a web font (no free hosted equivalent bundled here), so this only
+# renders as true Century Gothic for users who have it installed locally (common on
+# Windows/Office machines) — everyone else falls back to a similar-shaped sans-serif.
+st.markdown(
+    """
+    <style>
+    html, body, [class*="css"] {
+        font-family: 'Century Gothic', CenturyGothic, AppleGothic, sans-serif;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # Use more of the page width instead of Streamlit's default centered, margin-heavy layout.
 st.markdown(
     """
@@ -317,6 +331,7 @@ st.markdown(
 )
 
 st.title("DC Office Lunch Votes")
+st.subheader("All votes saved automatically")
 st.caption(date.today().strftime("%A, %B %d, %Y") + " (by Norman & Alessandro)")
 
 st.text_input("Your Name", key="voter_name")
