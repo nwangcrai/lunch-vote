@@ -16,7 +16,6 @@ DB_PATH = Path(__file__).parent / "votes.db"
 RESTAURANTS_CSV = Path(__file__).parent / "restaurants.csv"
 THUMBS_UP_PNG = Path(__file__).parent / "thumbs_up.png"
 THUMBS_DOWN_PNG = Path(__file__).parent / "thumbs_down.png"
-BACKUPS_DIR = Path(__file__).parent / "backups"
 
 
 @st.cache_data
@@ -52,8 +51,8 @@ def init_db() -> None:
         conn.execute("ALTER TABLE restaurants ADD COLUMN description TEXT NOT NULL DEFAULT ''")
     # "CREATE TABLE IF NOT EXISTS" is a no-op against a votes.db left over from an older
     # schema version, so drop and recreate if the table predates the sentiment column or
-    # still carries the retired vote_date column (votes are now permanent until a manual
-    # reset, not daily-scoped).
+    # still carries the retired vote_date column (votes are now permanent, not
+    # daily-scoped).
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(votes)")}
     if existing_cols and ("sentiment" not in existing_cols or "vote_date" in existing_cols):
         conn.execute("DROP TABLE votes")
@@ -70,8 +69,8 @@ def init_db() -> None:
         """
     )
 
-    # Append-only audit trail: never dropped/cleared by reset_all_votes (or the schema-drop
-    # migration above), so vote history always survives an accidental or malicious reset.
+    # Append-only audit trail: never dropped/cleared by the schema-drop migration above,
+    # so vote history always survives.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS vote_log (
@@ -136,7 +135,7 @@ def _log(conn: sqlite3.Connection, voter_name: str | None, restaurant_name: str 
 
 def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
     """Upsert a thumbs up/down vote. Voting the same sentiment again clears it (toggle off).
-    Votes are permanent (one per person per restaurant) until an admin reset clears the table."""
+    Votes are permanent, one per person per restaurant."""
     conn = get_connection()
     restaurant_id = conn.execute(
         "SELECT id FROM restaurants WHERE name = ?", (restaurant_name,)
@@ -168,44 +167,6 @@ def cast_vote(voter_name: str, restaurant_name: str, sentiment: str) -> None:
     get_results.clear()
     get_respondent_count.clear()
     get_my_votes.clear()
-
-
-def backup_votes() -> Path:
-    """Snapshot the current votes table to a timestamped CSV before any destructive
-    operation, so a reset (accidental or malicious) is always recoverable by hand."""
-    conn = get_connection()
-    df = pd.read_sql_query(
-        """
-        SELECT v.voter_name, r.name AS restaurant_name, v.sentiment
-        FROM votes v JOIN restaurants r ON r.id = v.restaurant_id
-        """,
-        conn,
-    )
-    BACKUPS_DIR.mkdir(exist_ok=True)
-    backup_path = BACKUPS_DIR / f"votes_{pd.Timestamp.utcnow().strftime('%Y%m%dT%H%M%SZ')}.csv"
-    df.to_csv(backup_path, index=False)
-    return backup_path
-
-
-def reset_all_votes() -> Path:
-    """Backs up all current votes to CSV and logs the reset (with a full row-by-row
-    record in vote_log, which reset never clears) before wiping the votes table."""
-    backup_path = backup_votes()
-    conn = get_connection()
-    rows = conn.execute(
-        """
-        SELECT v.voter_name, r.name, v.sentiment FROM votes v
-        JOIN restaurants r ON r.id = v.restaurant_id
-        """
-    ).fetchall()
-    for voter_name, restaurant_name, sentiment in rows:
-        _log(conn, voter_name, restaurant_name, "reset", sentiment)
-    conn.execute("DELETE FROM votes")
-    conn.commit()
-    get_results.clear()
-    get_respondent_count.clear()
-    get_my_votes.clear()
-    return backup_path
 
 
 @st.cache_data(ttl=5)
@@ -424,15 +385,10 @@ if st.query_params.get("admin") == "1":
                 st.error("Incorrect password.")
 
     with st.expander("Admin: view / download vote log"):
-        st.caption(
-            "A CSV backup of current votes is written to backups/ automatically before "
-            "any reset, and every vote (and reset) is permanently recorded in the "
-            "vote_log table regardless."
-        )
-        # Read-only, so no RESET confirm phrase needed — just the password. This is what
-        # actually lets you recover from an accidental reset: vote_log and the CSV backups
-        # only survive an in-app reset, not a Streamlit Cloud redeploy/restart (ephemeral
-        # filesystem), so download a copy here before that happens rather than after.
+        st.caption("Every vote change is permanently recorded in the vote_log table.")
+        # Read-only — just the password, no confirm phrase needed. vote_log doesn't
+        # survive a Streamlit Cloud redeploy/restart (ephemeral filesystem), so download
+        # a copy here before that happens rather than after.
         log_password = st.text_input(
             "Password", type="password", key="log_password_input"
         )
@@ -453,39 +409,3 @@ if st.query_params.get("admin") == "1":
             else:
                 st.error("Incorrect password.")
 
-    with st.expander("Admin: reset votes"):
-        st.caption(
-            "A CSV backup of current votes is written to backups/ automatically before "
-            "any reset, and every vote (and reset) is permanently recorded in the "
-            "vote_log table regardless."
-        )
-        # The password/confirm fields are keyed on a nonce that bumps after every attempt
-        # (success or failure), forcing Streamlit to remount them as brand-new widgets.
-        # Deleting the old session_state entry alone isn't enough: the browser keeps
-        # showing (and resubmitting) its own last-typed value in the same DOM input, so a
-        # correct password typed once could be resubmitted just by clicking the button
-        # again with nothing retyped — that's what caused an undesired reset in production.
-        if "reset_form_nonce" not in st.session_state:
-            st.session_state["reset_form_nonce"] = 0
-        nonce = st.session_state["reset_form_nonce"]
-        reset_password = st.text_input(
-            "Password", type="password", key=f"reset_password_input_{nonce}"
-        )
-        confirm_phrase = st.text_input(
-            "Type RESET to confirm", key=f"reset_confirm_input_{nonce}"
-        )
-        if st.button("Reset all votes"):
-            password_ok = reset_password and reset_password == st.secrets.get("reset_password")
-            confirm_ok = confirm_phrase.strip() == "RESET"
-            # Bump the nonce so the password/confirm widgets remount blank on the next run
-            # (success or not) — but don't st.rerun() here on failure, since that would
-            # immediately discard this run's st.error() before the browser ever renders it.
-            st.session_state["reset_form_nonce"] += 1
-            if password_ok and confirm_ok:
-                backup_path = reset_all_votes()
-                st.success(f"All votes have been reset. Backup saved to {backup_path.name}.")
-                st.rerun()
-            elif not password_ok:
-                st.error("Incorrect password.")
-            else:
-                st.error('Type "RESET" exactly to confirm.')
